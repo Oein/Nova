@@ -463,14 +463,21 @@
     const pos = hitTest(e);
     if (!pos) return;
     stickyX = null;
-    cursor = { selections: [{ anchor: pos, head: pos }], primary: 0 };
+    // Shift+click extends the selection from the existing anchor to the
+    // clicked position — matches macOS / Sublime / VS Code. The subsequent
+    // drag (if any) keeps the same anchor, so the user can rubber-band the
+    // head around while holding shift.
+    const existingAnchor = primary(cursor).anchor;
+    const anchor = e.shiftKey ? existingAnchor : pos;
+    const head = pos;
+    cursor = { selections: [{ anchor, head }], primary: 0 };
     publishStatus(cursor);
-    updateCursor(tab.id, pos.line, pos.col);
+    updateCursor(tab.id, head.line, head.col);
     focusInput();
     const move = (ev: MouseEvent) => {
       const p2 = hitTest(ev);
       if (!p2) return;
-      cursor = { ...cursor, selections: [{ anchor: cursor.selections[0].anchor, head: p2 }] };
+      cursor = { ...cursor, selections: [{ anchor, head: p2 }] };
       publishStatus(cursor);
       updateCursor(tab.id, p2.line, p2.col);
     };
@@ -592,9 +599,12 @@
   }
 
   function hitTest(e: MouseEvent): { line: number; col: number } | null {
+    // rowsHost (.gutter) lives inside the scrolling viewport, so its
+    // bounding rect already moves with scroll — e.clientY - rect.top
+    // IS the content-space y. Adding viewport.scrollTop would double-count.
     const rect = rowsHost.getBoundingClientRect();
-    const y = e.clientY - rect.top + viewport.scrollTop;
-    const x = e.clientX - rect.left + viewport.scrollLeft - contentLeft;
+    const y = e.clientY - rect.top;
+    const x = e.clientX - rect.left - contentLeft;
     if (totalVisualRows === 0 || lineCount === 0) return { line: 0, col: 0 };
     const vr = Math.max(0, Math.min(totalVisualRows - 1, Math.floor(y / rowHeight)));
     const bl = bufferLineAtVisualRow(lineYOffset, vr);
@@ -863,9 +873,9 @@
         on:compositionstart={onCompositionStart}
         on:compositionupdate={onCompositionUpdate}
         on:compositionend={onCompositionEnd}
-        on:paste={onPaste}
-        on:copy={onCopy}
-        on:cut={onCut}
+        on:paste|stopPropagation={onPaste}
+        on:copy|stopPropagation={onCopy}
+        on:cut|stopPropagation={onCut}
         on:blur={onInputBlur}
         style="top: {caret.yRow * rowHeight}px; left: {caret.xPx}px; height: {rowHeight}px"
       ></textarea>
@@ -888,6 +898,10 @@
     background: var(--bg-0);
     color: var(--fg-0);
     white-space: pre;
+    /* I-beam over the whole editing surface — .gutter overrides below so
+       the line-number rail keeps the arrow (and advertises itself as a
+       click target for line selection). */
+    cursor: text;
   }
   .canvas {
     position: relative;
@@ -902,6 +916,7 @@
     color: var(--fg-2);
     border-right: 1px solid var(--bg-2);
     user-select: none;
+    cursor: default;
   }
   .gutter-line {
     position: absolute;
@@ -974,6 +989,15 @@
     background: transparent;
     color: transparent;
     white-space: pre;
+    /* This textarea is keyboard-only — it relays keys / IME to the buffer
+       but the user never aims the mouse at it. Pass mouse through so
+       hovering the caret zone still shows the editor's I-beam (WKWebView's
+       UA cursor for an opacity-0 textarea otherwise flickers to arrow),
+       and so clicks reach the underlying .editor handler without the 1px
+       textarea briefly eating them. Focus is set programmatically via
+       focusInput(). */
+    pointer-events: none;
+    cursor: text;
   }
   .readonly-badge {
     position: absolute;

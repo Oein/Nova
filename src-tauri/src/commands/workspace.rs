@@ -238,6 +238,52 @@ pub async fn purge_trashed_note(
     Ok(())
 }
 
+/// Reveal a note's backing file in the host OS's file manager. On macOS
+/// this is `open -R <path>` which highlights the file inside Finder; on
+/// other platforms we just open the containing folder.
+#[tauri::command]
+pub async fn reveal_note(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), AppError> {
+    let path = {
+        let guard = state.workspace.lock().unwrap();
+        let ws = guard.as_ref().ok_or_else(|| AppError::Other("no workspace open".into()))?;
+        ws.note_path(&id)
+    };
+    if !path.exists() {
+        return Err(AppError::Other(format!(
+            "note {} is not on disk",
+            path.display()
+        )));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()
+            .map_err(AppError::Io)?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map_err(AppError::Io)?;
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        if let Some(parent) = path.parent() {
+            std::process::Command::new("xdg-open")
+                .arg(parent)
+                .spawn()
+                .map_err(AppError::Io)?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_session(state: tauri::State<'_, AppState>) -> Result<Session, AppError> {
     let guard = state.workspace.lock().unwrap();

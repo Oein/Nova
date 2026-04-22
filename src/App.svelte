@@ -8,6 +8,7 @@
   import BottomBar from "$lib/components/BottomBar.svelte";
   import TrashPanel from "$lib/components/TrashPanel.svelte";
   import Spotlight from "$lib/components/Spotlight.svelte";
+  import ContextMenu from "$lib/components/ContextMenu.svelte";
   import { spotlightOpen } from "$lib/stores/spotlight";
   import { measureMetrics, metrics } from "$lib/editor/measure";
   import { editorFontSize, zoomIn, zoomOut, zoomReset } from "$lib/editor/fontSize";
@@ -314,6 +315,7 @@
 <ConfirmDelete />
 <TrashPanel />
 <Spotlight />
+<ContextMenu />
 
 <style>
   .shell {

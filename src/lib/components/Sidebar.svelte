@@ -5,7 +5,9 @@
   import { workspacePath, notes } from "$lib/stores/workspace";
   import { activeTabId } from "$lib/stores/tabs";
   import { toast, collapsedGroups, selectedNoteIds, selectionAnchor } from "$lib/stores/ui";
-  import { openNote, createAndOpenNote, loadWorkspace } from "$lib/tabManager";
+  import { openNote, createAndOpenNote, loadWorkspace, deleteNotes } from "$lib/tabManager";
+  import { confirmDelete } from "$lib/stores/confirmDelete";
+  import { openContextMenu } from "$lib/stores/contextMenu";
   import DateGroup from "./DateGroup.svelte";
   import { sortedGroups } from "$lib/stores/workspace";
 
@@ -65,6 +67,46 @@
     void openNote(id);
   }
 
+  // Right-click on a note row: open a floating menu with Reveal-in-Finder +
+  // Delete. If the row is already part of a multi-selection, act on the whole
+  // group; otherwise treat the right-clicked row as the target.
+  function handleEntryContextMenu(id: string, e: MouseEvent) {
+    const current = get(selectedNoteIds);
+    const targets = current.has(id) && current.size > 1 ? [...current] : [id];
+    if (!current.has(id)) {
+      selectedNoteIds.set(new Set([id]));
+      selectionAnchor.set(id);
+    }
+    const list = get(notes);
+    const sample = list.find((n) => n.id === targets[0])?.title ?? "Untitled";
+    const singular = targets.length === 1;
+    openContextMenu(e.clientX, e.clientY, [
+      {
+        label: "Finder에서 보기",
+        disabled: !singular,
+        onSelect: async () => {
+          try {
+            await ipc.revealNote(id);
+          } catch (err) {
+            console.error(err);
+            toast("Failed to reveal in Finder");
+          }
+        },
+      },
+      {
+        label: singular ? "삭제" : `삭제 (${targets.length}개)`,
+        danger: true,
+        onSelect: () => {
+          confirmDelete.set({
+            count: targets.length,
+            sampleTitle: sample,
+            onConfirm: () => deleteNotes(targets),
+          });
+        },
+      },
+    ]);
+  }
+
   onMount(() => {
     if (import.meta.env.VITE_BACKEND === "mock") {
       ipc.pickWorkspace().then((p) => {
@@ -98,7 +140,12 @@
         <div class="empty-notes">No notes yet — click + to create one.</div>
       {:else}
         {#each $sortedGroups as g (g.key)}
-          <DateGroup group={g} activeId={$activeTabId} onEntryClick={handleEntryClick} />
+          <DateGroup
+            group={g}
+            activeId={$activeTabId}
+            onEntryClick={handleEntryClick}
+            onEntryContextMenu={handleEntryContextMenu}
+          />
         {/each}
       {/if}
     </div>

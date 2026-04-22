@@ -31,6 +31,7 @@ interface Backend {
   saveTabState(tab: SessionTab): Promise<void>;
   setActiveTab(active: string | null): Promise<void>;
   removeTabState(id: string): Promise<void>;
+  revealNote(id: string): Promise<void>;
 }
 
 async function loadTauriBackend(): Promise<Backend> {
@@ -57,6 +58,7 @@ async function loadTauriBackend(): Promise<Backend> {
     saveTabState: (tab) => invoke("save_tab_state", { tab }),
     setActiveTab: (active) => invoke("set_active_tab", { active }),
     removeTabState: (id) => invoke("remove_tab_state", { id }),
+    revealNote: (id) => invoke("reveal_note", { id }),
   };
 }
 
@@ -88,6 +90,7 @@ export const ipc: Backend = {
   saveTabState: async (t) => (await getBackend()).saveTabState(t),
   setActiveTab: async (a) => (await getBackend()).setActiveTab(a),
   removeTabState: async (i) => (await getBackend()).removeTabState(i),
+  revealNote: async (i) => (await getBackend()).revealNote(i),
 };
 
 export const isMock = MOCK;

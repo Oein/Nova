@@ -6,6 +6,7 @@
   export let selected: boolean;
   export let dirty: boolean;
   export let onClick: (id: string, e: MouseEvent) => void;
+  export let onContextMenu: (id: string, e: MouseEvent) => void;
 </script>
 
 <li>
@@ -14,6 +15,7 @@
     class:active
     class:selected
     on:click={(e) => onClick(entry.id, e)}
+    on:contextmenu|preventDefault={(e) => onContextMenu(entry.id, e)}
     data-note-id={entry.id}
     title={entry.title}
   >

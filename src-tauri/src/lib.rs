@@ -7,7 +7,7 @@ pub mod state;
 pub mod workspace;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 const APP_NAME: &str = "Nova";
 
@@ -107,6 +107,15 @@ fn build_menu<R: tauri::Runtime>(
                 .build(app)?,
         )
         .separator()
+        // macOS convention: ⌃⌘F toggles full screen. (The "fn" key is a
+        // hardware/OS modifier that browsers/webviews don't expose, so we
+        // can't bind Fn+F directly.)
+        .item(
+            &MenuItemBuilder::with_id("view:toggle-fullscreen", "Toggle Full Screen")
+                .accelerator("Ctrl+Cmd+F")
+                .build(app)?,
+        )
+        .separator()
         .item(
             &MenuItemBuilder::with_id("tab:next", "Next Tab")
                 .accelerator("Ctrl+Tab")
@@ -145,6 +154,15 @@ pub fn run() {
         .menu(|handle| build_menu(handle))
         .on_menu_event(|app, event| {
             let id = event.id().as_ref().to_string();
+            // Full-screen toggle is a window-level operation — handle it in
+            // Rust rather than round-tripping through the webview.
+            if id == "view:toggle-fullscreen" {
+                if let Some(win) = app.get_webview_window("main") {
+                    let current = win.is_fullscreen().unwrap_or(false);
+                    let _ = win.set_fullscreen(!current);
+                }
+                return;
+            }
             // Forward only our custom ids; predefined items (cut/copy/paste/…)
             // handle themselves via the OS.
             if id.contains(':') {
@@ -179,6 +197,7 @@ pub fn run() {
             commands::workspace::save_tab_state,
             commands::workspace::set_active_tab,
             commands::workspace::remove_tab_state,
+            commands::workspace::reveal_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

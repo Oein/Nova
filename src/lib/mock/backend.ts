@@ -220,6 +220,10 @@ export const mockBackend = {
   async removeTabState(id: string): Promise<void> {
     sessionTabs.delete(id);
   },
+
+  async revealNote(_id: string): Promise<void> {
+    // Mock backend doesn't have a real filesystem — no-op so UI flows work.
+  },
 };
 
 export const mockBackendTestHooks = {

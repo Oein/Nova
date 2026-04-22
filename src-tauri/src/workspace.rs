@@ -18,6 +18,7 @@ impl Workspace {
     pub fn open(root: &Path) -> AppResult<Self> {
         std::fs::create_dir_all(root)?;
         std::fs::create_dir_all(root.join("notes"))?;
+        std::fs::create_dir_all(root.join("trash"))?;
         let db_path = root.join("workspace.db");
         let conn = Connection::open(&db_path).map_err(map_sql_err)?;
         conn.execute_batch(SCHEMA).map_err(map_sql_err)?;
@@ -91,7 +92,27 @@ impl Workspace {
         Ok(())
     }
 
+    /// On-disk path for the note's current location. Resolves to `trash/` when
+    /// the note is soft-deleted, otherwise `notes/`. Callers that read/write a
+    /// note's content don't need to care which folder it's in.
     pub fn note_path(&self, id: &str) -> PathBuf {
+        let row: Option<(Option<String>, Option<i64>)> = self
+            .conn
+            .query_row(
+                "SELECT filename, deleted_at_ms FROM notes WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        let (filename, deleted_at) = row.unwrap_or((None, None));
+        let name = filename.unwrap_or_else(|| format!("{}.md", id));
+        let dir = if deleted_at.is_some() { "trash" } else { "notes" };
+        self.root.join(dir).join(name)
+    }
+
+    /// Explicit path under `notes/` for a given id, regardless of trash state.
+    /// Used by trash/restore to compute source and destination paths.
+    fn active_path(&self, id: &str) -> PathBuf {
         let filename: Option<String> = self
             .conn
             .query_row(
@@ -103,6 +124,21 @@ impl Workspace {
             .flatten();
         let name = filename.unwrap_or_else(|| format!("{}.md", id));
         self.root.join("notes").join(name)
+    }
+
+    /// Explicit path under `trash/` for a given id, regardless of trash state.
+    fn trash_path(&self, id: &str) -> PathBuf {
+        let filename: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT filename FROM notes WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        let name = filename.unwrap_or_else(|| format!("{}.md", id));
+        self.root.join("trash").join(name)
     }
 
     /// Picks a filename for a new note that won't collide with any existing
@@ -422,9 +458,24 @@ pub fn rename_note_file_if_title_changed(
     Ok(new_path)
 }
 
-/// Soft-delete: sets deleted_at_ms so the note is hidden from active list but
-/// kept on disk for possible restore. Callers are responsible for purging.
+/// Soft-delete: moves the backing file from `notes/` to `trash/`, sets
+/// deleted_at_ms so the note is hidden from active list, and clears any open
+/// session tab. Callers are responsible for purging after the retention
+/// window expires.
+///
+/// Move happens before the DB update so that a filesystem failure doesn't
+/// leave the row pointing at a ghost path. If the source file is missing
+/// (e.g. user deleted it externally) we still mark the row as trashed — the
+/// restore path will tolerate a missing file too.
 pub fn trash_note(ws: &Workspace, id: &str, now_ms: i64) -> AppResult<()> {
+    let src = ws.active_path(id);
+    let dst = ws.trash_path(id);
+    if src.exists() {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&src, &dst)?;
+    }
     ws.conn
         .execute(
             "UPDATE notes SET deleted_at_ms = ?1 WHERE id = ?2",
@@ -466,8 +517,13 @@ pub fn purge_old_trash(ws: &Workspace, cutoff_ms: i64) -> AppResult<usize> {
     Ok(ids.len())
 }
 
-/// Hard-deletes a single note (used by tests / admin paths).
+/// Hard-deletes a single note: removes the DB row, FTS entry, session tab,
+/// and the backing file (wherever it currently lives — resolved via
+/// `note_path` so it works for both active and trashed notes).
 pub fn hard_delete_note(ws: &Workspace, id: &str) -> AppResult<()> {
+    // Resolve the file path BEFORE deleting the row (note_path reads the DB).
+    let path = ws.note_path(id);
+    let _ = std::fs::remove_file(&path);
     ws.conn
         .execute("DELETE FROM notes WHERE id = ?1", params![id])
         .map_err(map_sql_err)?;
@@ -706,9 +762,52 @@ pub fn list_trashed_notes(ws: &Workspace) -> AppResult<Vec<TrashedNote>> {
     Ok(out)
 }
 
-/// Restores a trashed note: clears deleted_at_ms and bumps mtime so it appears
-/// at the top of the active list again.
+/// Restores a trashed note: moves the backing file from `trash/` back to
+/// `notes/`, clears deleted_at_ms, and bumps mtime so it appears at the top of
+/// the active list again.
+///
+/// If a different active note has taken over this note's filename since it was
+/// trashed (`pick_filename` only checks non-trashed rows… actually it checks
+/// all rows, but defensively), we pick a fresh name to avoid collision. The
+/// DB `filename` column is updated to match.
 pub fn restore_note(ws: &Workspace, id: &str, now_ms: i64) -> AppResult<()> {
+    // Resolve title so we can rename if the original filename is taken.
+    let title: String = ws
+        .conn
+        .query_row(
+            "SELECT title FROM notes WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| String::new());
+    let src = ws.trash_path(id);
+    let current_filename: Option<String> = ws
+        .conn
+        .query_row(
+            "SELECT filename FROM notes WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    // Pick a non-colliding filename under notes/ — excluding self so if the
+    // existing name is still free, we keep it.
+    let new_name = ws.pick_filename(&title, id, Some(id));
+    let dst = ws.root.join("notes").join(&new_name);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if src.exists() {
+        std::fs::rename(&src, &dst)?;
+    }
+    if current_filename.as_deref() != Some(new_name.as_str()) {
+        ws.conn
+            .execute(
+                "UPDATE notes SET filename = ?1 WHERE id = ?2",
+                params![new_name, id],
+            )
+            .map_err(map_sql_err)?;
+    }
     ws.conn
         .execute(
             "UPDATE notes SET deleted_at_ms = NULL, mtime_ms = ?1 WHERE id = ?2",
@@ -876,6 +975,38 @@ mod tests {
     }
 
     #[test]
+    fn trash_moves_file_to_trash_folder() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        insert_note(
+            &ws,
+            &Note {
+                id: "abc".into(),
+                title: "Hello".into(),
+                created_ms: 100,
+                mtime_ms: 200,
+                size: 5,
+            },
+            "hello",
+        )
+        .unwrap();
+        let active_path = ws.active_path("abc");
+        std::fs::write(&active_path, "hello").unwrap();
+        assert!(active_path.starts_with(dir.path().join("notes")));
+
+        trash_note(&ws, "abc", 500).unwrap();
+
+        assert_eq!(list_notes(&ws).unwrap().len(), 0, "trashed note hidden from active list");
+        assert!(!active_path.exists(), "original notes/ file moved away");
+        let trashed_path = ws.trash_path("abc");
+        assert!(trashed_path.starts_with(dir.path().join("trash")));
+        assert!(trashed_path.is_file(), "file now lives under trash/");
+        assert_eq!(std::fs::read_to_string(&trashed_path).unwrap(), "hello");
+        // note_path() should follow the file into trash/.
+        assert_eq!(ws.note_path("abc"), trashed_path);
+    }
+
+    #[test]
     fn trash_and_purge_round_trip() {
         let dir = tempdir().unwrap();
         let ws = Workspace::open(dir.path()).unwrap();
@@ -891,17 +1022,98 @@ mod tests {
             "hello",
         )
         .unwrap();
-        let file_path = ws.note_path("abc");
-        std::fs::write(&file_path, "hello").unwrap();
+        let active_path = ws.active_path("abc");
+        std::fs::write(&active_path, "hello").unwrap();
         trash_note(&ws, "abc", 500).unwrap();
-        assert_eq!(list_notes(&ws).unwrap().len(), 0, "trashed note hidden from active list");
-        assert!(file_path.is_file(), "file kept on disk while in trash");
+        let trashed_path = ws.trash_path("abc");
+        assert!(trashed_path.is_file(), "file kept on disk while in trash");
         let purged = purge_old_trash(&ws, 400).unwrap();
         assert_eq!(purged, 0, "cutoff < deleted_at — nothing purged");
-        assert!(file_path.is_file());
+        assert!(trashed_path.is_file());
         let purged = purge_old_trash(&ws, 600).unwrap();
         assert_eq!(purged, 1, "cutoff > deleted_at — purged");
-        assert!(!file_path.exists(), "file removed on purge");
+        assert!(!trashed_path.exists(), "file removed on purge");
+    }
+
+    #[test]
+    fn restore_moves_file_back_to_notes_folder() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        insert_note(
+            &ws,
+            &Note {
+                id: "abc".into(),
+                title: "Hello".into(),
+                created_ms: 100,
+                mtime_ms: 200,
+                size: 5,
+            },
+            "hello",
+        )
+        .unwrap();
+        let active_path = ws.active_path("abc");
+        std::fs::write(&active_path, "hello").unwrap();
+
+        trash_note(&ws, "abc", 500).unwrap();
+        assert!(!active_path.exists());
+        assert!(ws.trash_path("abc").is_file());
+
+        restore_note(&ws, "abc", 900).unwrap();
+
+        assert_eq!(list_notes(&ws).unwrap().len(), 1, "restored note visible again");
+        assert!(!ws.trash_path("abc").exists(), "file no longer in trash/");
+        assert!(active_path.is_file(), "file back under notes/");
+        assert_eq!(std::fs::read_to_string(&active_path).unwrap(), "hello");
+        // mtime bumped so restored note sorts to the top.
+        assert_eq!(get_note(&ws, "abc").unwrap().mtime_ms, 900);
+    }
+
+    #[test]
+    fn restore_handles_filename_collision() {
+        // If another note has grabbed the same filename while this one was in
+        // trash, restore should pick a fresh name and update the DB column so
+        // note_path keeps resolving.
+        let dir = tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        // Seed: note A exists, gets trashed.
+        insert_note(
+            &ws,
+            &Note {
+                id: "aaaaaaaa-1".into(),
+                title: "Same Title".into(),
+                created_ms: 1,
+                mtime_ms: 1,
+                size: 0,
+            },
+            "",
+        )
+        .unwrap();
+        std::fs::write(ws.active_path("aaaaaaaa-1"), "first").unwrap();
+        trash_note(&ws, "aaaaaaaa-1", 100).unwrap();
+
+        // Force a collision: manually set another row to the same filename A
+        // would restore to, simulating a race. Use the first 8-char prefix
+        // that `filename_for` would derive for "aaaaaaaa-1".
+        let taken_name = filename_for("Same Title", "aaaaaaaa-1");
+        ws.conn
+            .execute(
+                "INSERT INTO notes (id, title, created_ms, mtime_ms, size, filename) \
+                 VALUES ('other', 'Same Title', 2, 2, 0, ?1)",
+                params![taken_name],
+            )
+            .unwrap();
+
+        restore_note(&ws, "aaaaaaaa-1", 200).unwrap();
+
+        // Restored file is on disk under a unique name (with a -N suffix).
+        let restored_path = ws.note_path("aaaaaaaa-1");
+        assert!(restored_path.is_file(), "restored file exists: {:?}", restored_path);
+        assert_ne!(
+            restored_path.file_name().unwrap().to_string_lossy(),
+            taken_name,
+            "did not reuse the taken filename"
+        );
+        assert_eq!(std::fs::read_to_string(&restored_path).unwrap(), "first");
     }
 
     #[test]

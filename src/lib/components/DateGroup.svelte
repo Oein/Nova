@@ -7,6 +7,7 @@
   export let group: Group;
   export let activeId: string | null;
   export let onEntryClick: (id: string, e: MouseEvent) => void;
+  export let onEntryContextMenu: (id: string, e: MouseEvent) => void;
 
   $: collapsed = $collapsedGroups.has(group.key);
 </script>
@@ -26,6 +27,7 @@
           selected={$selectedNoteIds.has(e.id)}
           dirty={$dirtyTabs.has(e.id)}
           onClick={onEntryClick}
+          onContextMenu={onEntryContextMenu}
         />
       {/each}
     </ul>
