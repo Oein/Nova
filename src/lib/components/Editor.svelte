@@ -9,9 +9,11 @@
   import { metrics } from "$lib/editor/measure";
   import { graphemes } from "$lib/editor/grapheme";
   import { computeWrapStarts, subRowAt, bufferLineAtVisualRow } from "$lib/editor/wrap";
+  import { wordAt } from "$lib/editor/wordAt";
   import { saveActive } from "$lib/tabManager";
   import { updateCursor, updateScroll, getTabRuntime } from "$lib/sessionManager";
   import { editorStatus } from "$lib/stores/editorStatus";
+  import { menuAction } from "$lib/menu";
 
   export let buffer: Buffer;
   export let tab: OpenTab;
@@ -84,8 +86,38 @@
   }
 
   let unsub: (() => void) | null = null;
+  // Observe the viewport element so wrap recomputes when the editor's grid
+  // cell resizes for reasons other than window resize — e.g. toggling the
+  // sidebar (Cmd+B), drag-resizing the sidebar, or the tabbar/bottombar
+  // changing height. Without this, `contentWidth` stays frozen at whatever
+  // the window was when the editor mounted.
+  let viewportRO: ResizeObserver | null = null;
+  // Menu-bar actions that target the editor. macOS intercepts the
+  // accelerators before the webview sees them, so we can't rely on
+  // onKeyDown alone — the menu bridge is the source of truth.
+  let lastMenuSeq = -1;
+  const stopMenuSub = menuAction.subscribe((ev) => {
+    if (!ev || ev.seq === lastMenuSeq) return;
+    lastMenuSeq = ev.seq;
+    switch (ev.action) {
+      case "file:save":
+        saveActive();
+        return;
+      case "edit:undo":
+        dispatch({ type: "undo" });
+        return;
+      case "edit:redo":
+        dispatch({ type: "redo" });
+        return;
+      case "edit:select-all":
+        dispatch({ type: "select_all" });
+        return;
+    }
+  });
   onDestroy(() => {
     if (unsub) unsub();
+    viewportRO?.disconnect();
+    stopMenuSub();
     editorStatus.set(null);
   });
 
@@ -230,6 +262,10 @@
     recomputeVisible();
     await tick();
     onResize();
+    if (typeof ResizeObserver !== "undefined" && viewport) {
+      viewportRO = new ResizeObserver(onResize);
+      viewportRO.observe(viewport);
+    }
     if (initialScrollTop != null) {
       viewport.scrollTop = initialScrollTop;
       scrollTop = viewport.scrollTop;
@@ -371,6 +407,19 @@
   function onCompositionStart() {
     composing = true;
     compositionText = "";
+    // Selection-replace semantics: drop the selected text at the moment IME
+    // composition begins, so the preedit appears in place of the selection
+    // rather than floating next to it. If the user cancels composition
+    // (Escape), the deletion is recoverable via Cmd+Z.
+    const sel = primary(cursor);
+    if (!isEmpty(sel) && buffer.editable) {
+      const { from, to } = ordered(sel);
+      buffer.applyEdit({ kind: "delete", from, to });
+      cursor = withPrimary(cursor, { anchor: from, head: from });
+      stickyX = null;
+      updateCursor(tab.id, from.line, from.col);
+      publishStatus(cursor);
+    }
   }
   function onCompositionUpdate(e: CompositionEvent) {
     compositionText = e.data ?? "";
@@ -431,6 +480,49 @@
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
+  }
+
+  // True if the pointer is over the gutter column (line-number rail).
+  // Distinguishes "double-click to select line" (gutter) from
+  // "double-click to select word" (text area).
+  function isInGutter(e: MouseEvent): boolean {
+    const rect = viewport.getBoundingClientRect();
+    return e.clientX - rect.left < gutterWidth;
+  }
+
+  function selectRange(from: Pos, to: Pos) {
+    cursor = { selections: [{ anchor: from, head: to }], primary: 0 };
+    stickyX = null;
+    publishStatus(cursor);
+    updateCursor(tab.id, to.line, to.col);
+    focusInput();
+  }
+
+  function onDblClick(e: MouseEvent) {
+    const pos = hitTest(e);
+    if (!pos) return;
+    if (isInGutter(e)) {
+      // Select the whole buffer line. Include the trailing newline (by
+      // extending to col 0 of the next line) so copy/cut captures it —
+      // except on the very last line, which has no newline to grab.
+      const lineLen = buffer.getLine(pos.line).length;
+      const from: Pos = { line: pos.line, col: 0 };
+      const to: Pos =
+        pos.line + 1 < lineCount
+          ? { line: pos.line + 1, col: 0 }
+          : { line: pos.line, col: lineLen };
+      selectRange(from, to);
+      e.preventDefault();
+      return;
+    }
+    const line = buffer.getLine(pos.line);
+    const span = wordAt(line, pos.col);
+    if (span.start === span.end) return;
+    selectRange(
+      { line: pos.line, col: span.start },
+      { line: pos.line, col: span.end },
+    );
+    e.preventDefault();
   }
 
   const TABSIZE = 4;
@@ -705,6 +797,7 @@
   bind:this={viewport}
   on:scroll={onScroll}
   on:mousedown={onMouseDown}
+  on:dblclick={onDblClick}
   on:keydown={onKeyDown}
   on:paste={onPaste}
   on:copy={onCopy}

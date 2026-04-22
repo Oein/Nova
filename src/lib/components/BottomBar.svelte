@@ -49,8 +49,8 @@
 
 <style>
   footer {
-    display: grid;
-    grid-template-columns: 260px 1px 1fr;
+    display: flex;
+    justify-content: space-between;
     align-items: stretch;
     height: 22px;
     background: var(--bg-1);
@@ -65,7 +65,6 @@
     padding: 0 6px;
   }
   .right {
-    grid-column: 3;
     display: flex;
     align-items: center;
     justify-content: flex-end;
