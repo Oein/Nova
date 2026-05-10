@@ -135,6 +135,9 @@ export async function createAndOpenNote(): Promise<void> {
     title: note.title,
     mode: "rope",
     mtimeMs: note.mtimeMs,
+    // Freshly materialized placeholder — if closed before first save, the
+    // file+row should disappear entirely (see `closeNoteTab`).
+    neverSaved: true,
   };
   openTabs.update((t) => [...t, tab]);
   activeTabId.set(note.id);
@@ -153,7 +156,9 @@ export async function saveTab(id: string): Promise<boolean> {
     touchNote(note.id, note.title, note.mtimeMs, note.size);
     openTabs.update((t) =>
       t.map((x) =>
-        x.id === id ? { ...x, title: note.title, mtimeMs: note.mtimeMs } : x,
+        x.id === id
+          ? { ...x, title: note.title, mtimeMs: note.mtimeMs, neverSaved: false }
+          : x,
       ),
     );
     buf.markSaved(note.mtimeMs);
@@ -211,8 +216,24 @@ export async function deleteNotes(ids: string[]): Promise<void> {
 }
 
 export async function closeNoteTab(id: string): Promise<void> {
+  const tab = get(openTabs).find((t) => t.id === id);
+  // "Never saved" means `createAndOpenNote` just produced a placeholder
+  // row+file and the user hasn't committed anything yet. Closing should
+  // silently discard — no dirty dialog (whatever they typed was scratch),
+  // no trash (there's nothing meaningful to recover). Hard-delete the row
+  // and the empty on-disk file outright.
+  if (tab?.neverSaved) {
+    await closeTabForce(id);
+    try {
+      await ipc.hardDeleteNote(id);
+      removeNote(id);
+    } catch (err) {
+      console.error("hard delete never-saved note failed", id, err);
+    }
+    scheduleSessionFlush();
+    return;
+  }
   if (get(dirtyTabs).has(id)) {
-    const tab = get(openTabs).find((t) => t.id === id);
     confirmClose.set({
       id,
       title: tab?.title ?? "Untitled",

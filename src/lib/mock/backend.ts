@@ -129,6 +129,12 @@ export const mockBackend = {
     sessionTabs.delete(id);
   },
 
+  async hardDeleteNote(id: string): Promise<void> {
+    ensureSeeded();
+    notes.delete(id);
+    sessionTabs.delete(id);
+  },
+
   async listTrashedNotes(): Promise<TrashedNote[]> {
     ensureSeeded();
     return [...notes.values()]

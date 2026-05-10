@@ -195,6 +195,21 @@ pub async fn delete_note(
     Ok(())
 }
 
+/// Hard-delete a note: remove DB row, FTS entry, session tab, and the
+/// backing file outright — bypassing trash. Used by the frontend when a
+/// newly-created note is closed without ever being saved (the user never
+/// committed it, so there's nothing to preserve).
+#[tauri::command]
+pub async fn hard_delete_note(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), AppError> {
+    let guard = state.workspace.lock().unwrap();
+    let ws = guard.as_ref().ok_or_else(|| AppError::Other("no workspace open".into()))?;
+    workspace::hard_delete_note(ws, &id)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_trashed_notes(
     state: tauri::State<'_, AppState>,

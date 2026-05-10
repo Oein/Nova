@@ -77,6 +77,19 @@ fn build_menu<R: tauri::Runtime>(
                 .accelerator("CmdOrCtrl+A")
                 .build(app)?,
         )
+        .separator()
+        // Cmd+F is intercepted by macOS before the webview sees it, so it MUST
+        // live on the native menu — webview-level keydown handlers won't fire.
+        .item(
+            &MenuItemBuilder::with_id("edit:find", "Find…")
+                .accelerator("CmdOrCtrl+F")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("edit:replace", "Find and Replace…")
+                .accelerator("CmdOrCtrl+Alt+F")
+                .build(app)?,
+        )
         .build()?;
 
     let view_submenu = SubmenuBuilder::new(app, "View")
@@ -188,6 +201,7 @@ pub fn run() {
             commands::workspace::read_note,
             commands::workspace::write_note,
             commands::workspace::delete_note,
+            commands::workspace::hard_delete_note,
             commands::workspace::list_trashed_notes,
             commands::workspace::restore_note,
             commands::workspace::purge_trashed_note,

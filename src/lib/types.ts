@@ -98,6 +98,14 @@ export interface OpenTab {
   mtimeMs: number;
   initialCursor?: { line: number; col: number };
   initialScroll?: number;
+  // True while the note exists only because `createAndOpenNote` materialized
+  // a placeholder row+file on disk — the user has never explicitly saved it.
+  // Cleared on the first successful `saveTab`. If the tab is closed while
+  // still `neverSaved`, the note is hard-deleted (bypassing trash) since
+  // nothing the user committed would be lost. Not persisted across restarts:
+  // a session-restored tab is always treated as "saved" since the disk
+  // already holds whatever content we'd restore.
+  neverSaved?: boolean;
 }
 
 export interface Group {

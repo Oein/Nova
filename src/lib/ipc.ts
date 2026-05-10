@@ -22,6 +22,7 @@ interface Backend {
     expectedMtimeMs: number | null,
   ): Promise<Note>;
   deleteNote(id: string): Promise<void>;
+  hardDeleteNote(id: string): Promise<void>;
   listTrashedNotes(): Promise<TrashedNote[]>;
   restoreNote(id: string): Promise<Note>;
   purgeTrashedNote(id: string): Promise<void>;
@@ -49,6 +50,7 @@ async function loadTauriBackend(): Promise<Backend> {
     writeNote: (id, content, expectedMtimeMs) =>
       invoke("write_note", { id, content, expectedMtimeMs }),
     deleteNote: (id) => invoke("delete_note", { id }),
+    hardDeleteNote: (id) => invoke("hard_delete_note", { id }),
     listTrashedNotes: () => invoke("list_trashed_notes"),
     restoreNote: (id) => invoke("restore_note", { id }),
     purgeTrashedNote: (id) => invoke("purge_trashed_note", { id }),
@@ -81,6 +83,7 @@ export const ipc: Backend = {
   readNote: async (id) => (await getBackend()).readNote(id),
   writeNote: async (id, c, m) => (await getBackend()).writeNote(id, c, m),
   deleteNote: async (id) => (await getBackend()).deleteNote(id),
+  hardDeleteNote: async (id) => (await getBackend()).hardDeleteNote(id),
   listTrashedNotes: async () => (await getBackend()).listTrashedNotes(),
   restoreNote: async (id) => (await getBackend()).restoreNote(id),
   purgeTrashedNote: async (id) => (await getBackend()).purgeTrashedNote(id),

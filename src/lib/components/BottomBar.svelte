@@ -39,7 +39,10 @@
   <div class="right">
     {#if $editorStatus}
       {#if $editorStatus.selectionChars > 0}
-        <span>{$editorStatus.selectionChars} chars selected</span>
+        <span>
+          {$editorStatus.selectionChars} chars selected
+          ({$editorStatus.selectionCharsNoWs} excl. whitespace)
+        </span>
       {:else}
         <span>Ln {$editorStatus.line + 1}, Col {$editorStatus.col + 1}</span>
       {/if}

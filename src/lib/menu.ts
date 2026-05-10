@@ -14,6 +14,8 @@ export type MenuActionId =
   | "edit:undo"
   | "edit:redo"
   | "edit:select-all"
+  | "edit:find"
+  | "edit:replace"
   | "view:toggle-sidebar"
   | "view:spotlight"
   | "view:zoom-in"

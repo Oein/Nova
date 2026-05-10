@@ -63,6 +63,23 @@
   let cjkWidth = $metrics.cjkWidth;
   let composing = false;
   let compositionText = "";
+
+  // Find / Replace state. All held in-component (not a store) because every
+  // piece is tightly coupled to this editor's buffer + cursor.
+  interface FindMatch {
+    line: number;
+    startCol: number;
+    endCol: number;
+  }
+  let findOpen = false;
+  let replaceVisible = false;
+  let findQuery = "";
+  let replaceQuery = "";
+  let findCaseSensitive = false;
+  let findMatches: FindMatch[] = [];
+  let activeMatchIdx = -1;
+  let findInputEl: HTMLInputElement | null = null;
+  let replaceInputEl: HTMLInputElement | null = null;
   // Pixel x-target remembered across consecutive vertical moves, so walking
   // up/down across short lines still returns to the originating column.
   // Reset on any horizontal move, mouse click, or edit.
@@ -112,6 +129,12 @@
       case "edit:select-all":
         dispatch({ type: "select_all" });
         return;
+      case "edit:find":
+        openFind(false);
+        return;
+      case "edit:replace":
+        openFind(true);
+        return;
     }
   });
   onDestroy(() => {
@@ -132,12 +155,37 @@
     return n;
   }
 
+  // Per-line non-whitespace count over the selection. Line breaks are counted
+  // as whitespace (i.e. excluded), matching how most word-processor "글자 수
+  // (공백 제외)" tallies behave.
+  function countNonWs(s: string): number {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+      if (!/\s/.test(s[i])) n++;
+    }
+    return n;
+  }
+
+  function selectionCharLengthNoWs(c: CursorState): number {
+    const sel = primary(c);
+    if (isEmpty(sel)) return 0;
+    const { from, to } = ordered(sel);
+    if (from.line === to.line) {
+      return countNonWs(buffer.getLine(from.line).slice(from.col, to.col));
+    }
+    let n = countNonWs(buffer.getLine(from.line).slice(from.col));
+    for (let l = from.line + 1; l < to.line; l++) n += countNonWs(buffer.getLine(l));
+    n += countNonWs(buffer.getLine(to.line).slice(0, to.col));
+    return n;
+  }
+
   function publishStatus(c: CursorState) {
     const head = primary(c).head;
     editorStatus.set({
       line: head.line,
       col: head.col,
       selectionChars: selectionCharLength(c),
+      selectionCharsNoWs: selectionCharLengthNoWs(c),
     });
   }
 
@@ -167,6 +215,9 @@
       }
     }
     recomputeVisible();
+    // After edits (including replace-all), match highlights must be re-derived
+    // so stale col offsets don't point into moved text.
+    if (findOpen) recomputeMatches();
   }
 
   // Full rebuild of wrapStarts + lineYOffset. O(n × graphemes). Called on
@@ -357,7 +408,11 @@
     const head = primary(cursor).head;
     updateCursor(tab.id, head.line, head.col);
     publishStatus(cursor);
-    scrollCaretIntoView();
+    // Edits (insert/paste/backspace/enter) can grow totalVisualRows; a single
+    // synchronous scroll gets clamped to the pre-reflow max. The reflow-safe
+    // variant re-applies after tick() for any command that might have grown
+    // the buffer — overkill for pure cursor moves, but cheap and consistent.
+    void scrollCaretIntoViewAfterReflow();
   }
 
   function onKeyDown(e: KeyboardEvent) {
@@ -365,6 +420,12 @@
     if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
       e.preventDefault();
       saveActive();
+      return;
+    }
+    // Esc with the find bar open closes it and returns focus to the editor.
+    if (findOpen && e.key === "Escape") {
+      e.preventDefault();
+      closeFind();
       return;
     }
     const cmd = keymap(e, pageLines);
@@ -649,6 +710,37 @@
     }
   }
 
+  // After an edit, Svelte hasn't yet resized the scroll container's
+  // `sideHeight`. Two distinct hazards to handle:
+  //   - INSERT/paste grows sideHeight: the first scrollCaretIntoView gets
+  //     clamped to the OLD max when the caret lands past the old end. Re-apply
+  //     after tick() once the DOM reflects the new totalVisualRows.
+  //   - DELETE shrinks sideHeight: the browser auto-clamps scrollTop down to
+  //     the new max if our current scrollTop exceeded it. The visual effect
+  //     is "scroll jumped up" — annoying when the caret was visible all along.
+  //     We snapshot scrollTop before reflow and restore it if it still fits.
+  async function scrollCaretIntoViewAfterReflow() {
+    const snapshot = viewport ? viewport.scrollTop : 0;
+    scrollCaretIntoView();
+    await tick();
+    // Try to keep the user's view stable if the snapshot is still a valid
+    // scroll position AND the caret is visible at that scroll position.
+    // Otherwise fall through to scrollCaretIntoView, which only nudges when
+    // the caret is actually off-screen.
+    if (viewport) {
+      const maxScroll = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      if (snapshot <= maxScroll) {
+        const head = primary(cursor).head;
+        const cv = caretVisual(head.line, head.col);
+        const y = cv.yRow * rowHeight;
+        const visibleAtSnapshot =
+          y >= snapshot && y + rowHeight <= snapshot + viewport.clientHeight;
+        if (visibleAtSnapshot) viewport.scrollTop = snapshot;
+      }
+    }
+    scrollCaretIntoView();
+  }
+
   // Carries reactive deps through so `$:` blocks recompute when metrics change.
   function pin<T>(value: T, ..._deps: unknown[]): T {
     return value;
@@ -774,6 +866,226 @@
     return out;
   }
 
+  // ────────────── Find / Replace ──────────────
+
+  // Open the find bar. If `withReplace` is true, also show the replace row.
+  // Pre-fills the query from any single-line selection (matches Sublime / VS
+  // Code — if you select a word and hit Cmd+F, the selection becomes the
+  // query). Re-opening when already open just re-focuses the input.
+  async function openFind(withReplace: boolean) {
+    findOpen = true;
+    if (withReplace) replaceVisible = true;
+    const sel = primary(cursor);
+    if (!isEmpty(sel) && sel.anchor.line === sel.head.line) {
+      const { from, to } = ordered(sel);
+      const slice = buffer.getLine(from.line).slice(from.col, to.col);
+      if (slice.length > 0) findQuery = slice;
+    }
+    recomputeMatches();
+    await tick();
+    findInputEl?.focus();
+    findInputEl?.select();
+  }
+
+  function closeFind() {
+    findOpen = false;
+    replaceVisible = false;
+    findMatches = [];
+    activeMatchIdx = -1;
+    focusInput();
+  }
+
+  // Re-scan the whole buffer for occurrences of `findQuery`. Cheap enough on
+  // small-to-medium notes (`indexOf` is native and linear). For massive files
+  // this could be made incremental, but v1 keeps it simple.
+  function recomputeMatches() {
+    if (!findOpen || !findQuery) {
+      findMatches = [];
+      activeMatchIdx = -1;
+      return;
+    }
+    const q = findCaseSensitive ? findQuery : findQuery.toLowerCase();
+    const out: FindMatch[] = [];
+    for (let l = 0; l < buffer.lineCount; l++) {
+      const raw = buffer.getLine(l);
+      const hay = findCaseSensitive ? raw : raw.toLowerCase();
+      let i = 0;
+      while (i <= hay.length - q.length) {
+        const idx = hay.indexOf(q, i);
+        if (idx === -1) break;
+        out.push({ line: l, startCol: idx, endCol: idx + q.length });
+        i = idx + Math.max(1, q.length); // max(1,…) guards against empty query
+      }
+    }
+    findMatches = out;
+    // Pick the first match at or after the current cursor head. Keeps "Cmd+F
+    // then Enter" feeling natural — you jump forward from where you are.
+    if (out.length === 0) {
+      activeMatchIdx = -1;
+      return;
+    }
+    const head = primary(cursor).head;
+    const idx = out.findIndex(
+      (m) => m.line > head.line || (m.line === head.line && m.startCol >= head.col),
+    );
+    activeMatchIdx = idx === -1 ? 0 : idx;
+  }
+
+  function gotoMatch(idx: number) {
+    if (findMatches.length === 0) return;
+    // Wrap around at both ends — Enter from the last match lands on the first.
+    const n = findMatches.length;
+    const wrapped = ((idx % n) + n) % n;
+    activeMatchIdx = wrapped;
+    const m = findMatches[wrapped];
+    const from = { line: m.line, col: m.startCol };
+    const to = { line: m.line, col: m.endCol };
+    cursor = withPrimary(cursor, { anchor: from, head: to });
+    publishStatus(cursor);
+    updateCursor(tab.id, to.line, to.col);
+    // Scroll target is the match's first visible row. We don't reuse
+    // scrollCaretIntoView because that aims at the caret (which is the head
+    // after this update) — same line, so equivalent here.
+    scrollCaretIntoView();
+  }
+
+  function findNext() {
+    if (findMatches.length === 0) return;
+    gotoMatch(activeMatchIdx + 1);
+  }
+
+  function findPrev() {
+    if (findMatches.length === 0) return;
+    gotoMatch(activeMatchIdx - 1);
+  }
+
+  function replaceCurrent() {
+    if (!buffer.editable) return;
+    if (activeMatchIdx < 0 || activeMatchIdx >= findMatches.length) return;
+    const m = findMatches[activeMatchIdx];
+    const from = { line: m.line, col: m.startCol };
+    const to = { line: m.line, col: m.endCol };
+    buffer.applyEdit({ kind: "delete", from, to });
+    if (replaceQuery.length > 0) {
+      buffer.applyEdit({ kind: "insert", at: from, text: replaceQuery });
+    }
+    // Land the cursor at the end of the replacement so the next Enter on the
+    // find input advances to the NEXT match past it. onBufferChange will
+    // re-run recomputeMatches and pick the first match ≥ current cursor.
+    const after = advancePosByText(from, replaceQuery);
+    cursor = withPrimary(cursor, { anchor: after, head: after });
+    publishStatus(cursor);
+    updateCursor(tab.id, after.line, after.col);
+  }
+
+  function replaceAll() {
+    if (!buffer.editable) return;
+    if (findMatches.length === 0) return;
+    // Iterate matches in reverse order so earlier-match column offsets stay
+    // valid while we mutate later-match locations first. All on the same
+    // buffer — edits flush through onBufferChange and trigger re-scan after.
+    for (let i = findMatches.length - 1; i >= 0; i--) {
+      const m = findMatches[i];
+      const from = { line: m.line, col: m.startCol };
+      const to = { line: m.line, col: m.endCol };
+      buffer.applyEdit({ kind: "delete", from, to });
+      if (replaceQuery.length > 0) {
+        buffer.applyEdit({ kind: "insert", at: from, text: replaceQuery });
+      }
+    }
+    // Place the caret at the end of the last (now-first) replacement so the
+    // user has a visual anchor. The re-scan will clear findMatches afterwards.
+    publishStatus(cursor);
+  }
+
+  // Same shape as advancePosByText in commands.ts — kept local so we don't
+  // import private helpers across module boundaries.
+  function advancePosByText(p: Pos, text: string): Pos {
+    if (!text.includes("\n")) return { line: p.line, col: p.col + text.length };
+    const lines = text.split("\n");
+    return { line: p.line + lines.length - 1, col: lines[lines.length - 1].length };
+  }
+
+  // Keystroke handling while focus is in the find / replace inputs. The
+  // editor-level onKeyDown doesn't see these because focus is on the input.
+  function onFindKeyDown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeFind();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (e.shiftKey) findPrev();
+      else findNext();
+    }
+  }
+  function onReplaceKeyDown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeFind();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      // Replace-and-advance: the common "go through every match" flow.
+      replaceCurrent();
+    }
+  }
+
+  // Re-scan when query / case-sensitivity changes AND preview-select the
+  // active match so Enter "advances from what you see." This path is ONLY for
+  // user actions in the find bar — buffer edits that happen elsewhere call
+  // recomputeMatches directly (no auto-navigate) so typing in the editor
+  // doesn't hijack the cursor into a match.
+  $: if (findOpen) {
+    findQuery;
+    findCaseSensitive;
+    recomputeMatches();
+    if (activeMatchIdx >= 0) gotoMatch(activeMatchIdx);
+  }
+
+  // Compute match rectangles for the visible viewport window. Mirrors the
+  // shape of computeSpans for selections. Active match uses a distinct class
+  // so it pops visually.
+  $: findSpans = pin(
+    computeFindSpans(findMatches, visibleStart, visibleEnd),
+    chWidth,
+    cjkWidth,
+    wrapStarts,
+  );
+  $: activeFindSpans = pin(
+    activeMatchIdx >= 0 && activeMatchIdx < findMatches.length
+      ? computeFindSpans([findMatches[activeMatchIdx]], visibleStart, visibleEnd)
+      : [],
+    chWidth,
+    cjkWidth,
+    wrapStarts,
+  );
+
+  function computeFindSpans(
+    matches: FindMatch[],
+    firstVR: number,
+    lastVR: number,
+  ): { l: number; x0: number; x1: number; key: string }[] {
+    const out: { l: number; x0: number; x1: number; key: string }[] = [];
+    for (let mi = 0; mi < matches.length; mi++) {
+      const m = matches[mi];
+      const starts = wrapStarts[m.line];
+      if (!starts) continue;
+      const line = buffer.getLine(m.line);
+      for (let sr = 0; sr < starts.length; sr++) {
+        const vr = (lineYOffset[m.line] ?? 0) + sr;
+        if (vr < firstVR || vr >= lastVR) continue;
+        const subStart = starts[sr];
+        const subEnd = sr + 1 < starts.length ? starts[sr + 1] : line.length;
+        const s0 = Math.max(subStart, m.startCol);
+        const s1 = Math.min(subEnd, m.endCol);
+        if (s1 <= s0) continue;
+        const x0 = visualPx(line.slice(subStart, s0), s0 - subStart);
+        const x1 = visualPx(line.slice(subStart, s1), s1 - subStart);
+        out.push({ l: vr, x0, x1, key: `${mi}:${vr}:${x0}` });
+      }
+    }
+    return out;
+  }
+
   // Clip the full-line token list to a [subStart, subEnd) window and slice
   // each token's text accordingly. Produces the spans rendered into one
   // wrapped sub-row.
@@ -836,6 +1148,18 @@
           style="top: {s.l * rowHeight}px; height: {rowHeight}px; left: {s.x0}px; width: {s.x1 - s.x0}px"
         />
       {/each}
+      {#each findSpans as s (s.key)}
+        <div
+          class="match"
+          style="top: {s.l * rowHeight}px; height: {rowHeight}px; left: {s.x0}px; width: {s.x1 - s.x0}px"
+        />
+      {/each}
+      {#each activeFindSpans as s (s.key)}
+        <div
+          class="match-active"
+          style="top: {s.l * rowHeight}px; height: {rowHeight}px; left: {s.x0}px; width: {s.x1 - s.x0}px"
+        />
+      {/each}
       {#each visibleLines as r (r.yRow)}
         <div class="row" style="top: {r.yRow * rowHeight}px; height: {rowHeight}px">
           {#if r.text}
@@ -886,6 +1210,95 @@
     <div class="readonly-badge">Read-only (large file)</div>
   {/if}
 </div>
+
+{#if findOpen}
+  <!-- Overlay, positioned by .editor-host (Editor's parent). Not inside the
+       scroll container so scrolling the buffer doesn't push the bar away. -->
+  <div class="find-bar" role="dialog" aria-label="Find and replace">
+    <div class="find-row">
+      <input
+        bind:this={findInputEl}
+        bind:value={findQuery}
+        on:keydown={onFindKeyDown}
+        class="find-input"
+        placeholder="Find"
+        aria-label="Find"
+        spellcheck="false"
+      />
+      <span class="find-count" aria-live="polite">
+        {#if findQuery === ""}
+          &nbsp;
+        {:else if findMatches.length === 0}
+          No matches
+        {:else}
+          {activeMatchIdx + 1} / {findMatches.length}
+        {/if}
+      </span>
+      <button
+        class="find-btn"
+        class:active={findCaseSensitive}
+        on:click={() => (findCaseSensitive = !findCaseSensitive)}
+        title="Match case"
+        aria-label="Match case"
+        aria-pressed={findCaseSensitive}
+      >Aa</button>
+      <button
+        class="find-btn"
+        on:click={findPrev}
+        disabled={findMatches.length === 0}
+        title="Previous (Shift+Enter)"
+        aria-label="Previous match"
+      >‹</button>
+      <button
+        class="find-btn"
+        on:click={findNext}
+        disabled={findMatches.length === 0}
+        title="Next (Enter)"
+        aria-label="Next match"
+      >›</button>
+      <button
+        class="find-btn"
+        class:active={replaceVisible}
+        on:click={() => (replaceVisible = !replaceVisible)}
+        title="Toggle replace"
+        aria-label="Toggle replace"
+        aria-pressed={replaceVisible}
+      >⇅</button>
+      <button
+        class="find-btn"
+        on:click={closeFind}
+        title="Close (Esc)"
+        aria-label="Close find"
+      >✕</button>
+    </div>
+    {#if replaceVisible}
+      <div class="find-row">
+        <input
+          bind:this={replaceInputEl}
+          bind:value={replaceQuery}
+          on:keydown={onReplaceKeyDown}
+          class="find-input"
+          placeholder="Replace"
+          aria-label="Replace"
+          spellcheck="false"
+          disabled={!buffer.editable}
+        />
+        <button
+          class="find-btn wide"
+          on:click={replaceCurrent}
+          disabled={findMatches.length === 0 || !buffer.editable}
+          title="Replace"
+        >Replace</button>
+        <button
+          class="find-btn wide"
+          on:click={replaceAll}
+          disabled={findMatches.length === 0 || !buffer.editable}
+          title="Replace all"
+        >All</button>
+      </div>
+    {/if}
+  </div>
+{/if}
 
 <style>
   .editor {
@@ -956,6 +1369,20 @@
     background: rgba(122, 162, 247, 0.25);
     pointer-events: none;
   }
+  .match {
+    position: absolute;
+    background: rgba(240, 200, 0, 0.28);
+    outline: 1px solid rgba(240, 200, 0, 0.55);
+    pointer-events: none;
+    box-sizing: border-box;
+  }
+  .match-active {
+    position: absolute;
+    background: rgba(255, 140, 0, 0.45);
+    outline: 1px solid rgba(255, 140, 0, 0.9);
+    pointer-events: none;
+    box-sizing: border-box;
+  }
   .caret {
     position: absolute;
     width: 1.5px;
@@ -1010,5 +1437,84 @@
     font-size: 11px;
     border-radius: 4px;
     pointer-events: none;
+  }
+  /* Find bar — overlaid top-right, stays in viewport regardless of scroll
+     because it's a sibling of .editor (both abs-positioned inside
+     .editor-host from EditorPane). */
+  .find-bar {
+    position: absolute;
+    top: 8px;
+    right: 16px;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-3);
+    border-radius: 6px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    z-index: 10;
+    min-width: 340px;
+  }
+  .find-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .find-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-0);
+    color: var(--fg-0);
+    border: 1px solid var(--bg-3);
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    outline: none;
+  }
+  .find-input:focus {
+    border-color: var(--accent, #7aa2f7);
+  }
+  .find-input:disabled {
+    color: var(--fg-2);
+    background: var(--bg-1);
+  }
+  .find-count {
+    font-size: 11px;
+    color: var(--fg-2);
+    font-family: var(--font-mono);
+    min-width: 60px;
+    text-align: right;
+    padding: 0 4px;
+    white-space: nowrap;
+  }
+  .find-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--fg-1);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 3px 7px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    line-height: 1;
+    min-width: 24px;
+    height: 24px;
+  }
+  .find-btn.wide {
+    min-width: 64px;
+  }
+  .find-btn:hover:not(:disabled) {
+    background: var(--bg-2);
+  }
+  .find-btn.active {
+    background: var(--bg-3);
+    color: var(--fg-0);
+  }
+  .find-btn:disabled {
+    color: var(--fg-2);
+    cursor: default;
+    opacity: 0.5;
   }
 </style>
