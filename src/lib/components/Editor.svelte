@@ -1109,6 +1109,29 @@
     }
     return out;
   }
+
+  // Split a MdToken[] at a character offset within the concatenated token text.
+  function splitTokensAt(
+    tokens: MdToken[],
+    at: number,
+  ): { before: MdToken[]; after: MdToken[] } {
+    const before: MdToken[] = [];
+    const after: MdToken[] = [];
+    let offset = 0;
+    for (const t of tokens) {
+      const end = offset + t.text.length;
+      if (end <= at) {
+        before.push(t);
+      } else if (offset >= at) {
+        after.push(t);
+      } else {
+        if (at > offset) before.push({ ...t, text: t.text.slice(0, at - offset) });
+        if (end > at) after.push({ ...t, text: t.text.slice(at - offset) });
+      }
+      offset = end;
+    }
+    return { before, after };
+  }
 </script>
 
 <svelte:window on:resize={onResize} />
@@ -1161,8 +1184,20 @@
         />
       {/each}
       {#each visibleLines as r (r.yRow)}
+        {@const head = primary(cursor).head}
+        {@const isPreeditRow = composing && r.line === head.line && head.col >= r.startCol && head.col <= r.startCol + r.text.length}
         <div class="row" style="top: {r.yRow * rowHeight}px; height: {rowHeight}px">
-          {#if r.text}
+          {#if isPreeditRow}
+            {@const at = head.col - r.startCol}
+            {@const split = splitTokensAt(r.tokens, at)}
+            {#each split.before as t, ti (ti)}<span
+                class:b={t.bold}
+                class:u={t.underline}
+                class:s={t.strike}>{t.text}</span>{/each}<span class="preedit-inline">{compositionText}</span>{#each split.after as t, ti (ti)}<span
+                class:b={t.bold}
+                class:u={t.underline}
+                class:s={t.strike}>{t.text}</span>{/each}
+          {:else if r.text}
             {#each r.tokens as t, ti (ti)}<span
                 class:b={t.bold}
                 class:u={t.underline}
@@ -1176,14 +1211,6 @@
         class="caret"
         style="top: {caret.yRow * rowHeight}px; height: {rowHeight}px; left: {caret.xPx}px"
       />
-      {#if composing}
-        <div
-          class="preedit"
-          style="top: {caret.yRow * rowHeight}px; height: {rowHeight}px; left: {caret.xPx}px"
-        >
-          {compositionText}
-        </div>
-      {/if}
       <textarea
         bind:this={inputEl}
         class="hidden-input"
@@ -1391,13 +1418,10 @@
     pointer-events: none;
   }
   @keyframes blink { 50% { opacity: 0; } }
-  .preedit {
-    position: absolute;
+  .preedit-inline {
     color: var(--accent);
     text-decoration: underline;
     pointer-events: none;
-    line-height: var(--editor-row-height, 20px);
-    white-space: pre;
   }
   .hidden-input {
     position: absolute;
