@@ -33,10 +33,7 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        run: npm run tauri:build
-        env:
-          # Disable code signing
-          APPLE_SIGNING_IDENTITY: ''
+        run: npx tauri build --bundles dmg
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
