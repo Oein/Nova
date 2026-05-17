@@ -8,15 +8,9 @@
   let clientWidth = 0;
   let scrollWidth = 0;
 
-  // Fade gradients on the left/right edges hint that there's more content
-  // scrolled out of view — a calmer affordance than a full scrollbar.
   $: showLeft = scrollLeft > 1;
   $: showRight = scrollWidth - (scrollLeft + clientWidth) > 1;
   $: hasOverflow = scrollWidth > clientWidth + 1;
-  // Custom thumb that mirrors native scrollbar position. Visual-only
-  // (pointer-events: none) — dragging isn't supported; users scroll via
-  // wheel/trackpad. The 20-px minimum width keeps the thumb graspable
-  // visually even when very many tabs are open.
   $: thumbLeft = scrollWidth > 0 ? (scrollLeft / scrollWidth) * clientWidth : 0;
   $: thumbWidth = scrollWidth > 0 ? Math.max(20, (clientWidth / scrollWidth) * clientWidth) : 0;
 
@@ -37,13 +31,11 @@
   });
   onDestroy(() => {
     ro?.disconnect();
+    stopAutoScroll();
   });
 
-  // Recompute fade/thumb state whenever the tab list mutates.
   $: if ($openTabs) void tick().then(measure);
 
-  // A plain vertical wheel (trackpad/mouse) should scroll the tab strip
-  // horizontally — the tabbar has no vertical axis to scroll.
   function onWheel(e: WheelEvent) {
     if (!tabbarEl) return;
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
@@ -51,14 +43,125 @@
       e.preventDefault();
     }
   }
+
+  // --- Drag-and-drop reorder ---
+  let draggedId: string | null = null;
+  let dropIndex: number | null = null;
+  let autoScrollRaf: number | null = null;
+  let dragClientX = 0;
+
+  const EDGE_ZONE = 60;
+  const SCROLL_SPEED = 8;
+
+  function stopAutoScroll() {
+    if (autoScrollRaf !== null) {
+      cancelAnimationFrame(autoScrollRaf);
+      autoScrollRaf = null;
+    }
+  }
+
+  function autoScrollStep() {
+    if (!tabbarEl || draggedId === null) {
+      autoScrollRaf = null;
+      return;
+    }
+    const rect = tabbarEl.getBoundingClientRect();
+    const distLeft = dragClientX - rect.left;
+    const distRight = rect.right - dragClientX;
+    if (distLeft < EDGE_ZONE && distLeft >= 0) {
+      tabbarEl.scrollLeft -= SCROLL_SPEED * (1 - distLeft / EDGE_ZONE);
+    } else if (distRight < EDGE_ZONE && distRight >= 0) {
+      tabbarEl.scrollLeft += SCROLL_SPEED * (1 - distRight / EDGE_ZONE);
+    }
+    measure();
+    autoScrollRaf = requestAnimationFrame(autoScrollStep);
+  }
+
+  function computeDropIndex(clientX: number): number {
+    if (!tabbarEl) return $openTabs.length;
+    const tabs = Array.from(tabbarEl.querySelectorAll<HTMLElement>(".tab"));
+    for (let i = 0; i < tabs.length; i++) {
+      const rect = tabs[i].getBoundingClientRect();
+      if (clientX < rect.left + rect.width / 2) return i;
+    }
+    return tabs.length;
+  }
+
+  function onDragStart(e: DragEvent, id: string) {
+    draggedId = id;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", id);
+    }
+  }
+
+  function onDragOver(e: DragEvent) {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    dragClientX = e.clientX;
+    dropIndex = computeDropIndex(e.clientX);
+    if (autoScrollRaf === null) {
+      autoScrollRaf = requestAnimationFrame(autoScrollStep);
+    }
+  }
+
+  function onDragLeave(e: DragEvent) {
+    const rel = e.relatedTarget as Node | null;
+    if (!tabbarEl.contains(rel)) {
+      dropIndex = null;
+      stopAutoScroll();
+    }
+  }
+
+  function onDrop(e: DragEvent) {
+    e.preventDefault();
+    stopAutoScroll();
+    if (draggedId === null || dropIndex === null) return;
+    const id = draggedId;
+    const target = dropIndex;
+    draggedId = null;
+    dropIndex = null;
+
+    openTabs.update((tabs) => {
+      const from = tabs.findIndex((t) => t.id === id);
+      if (from < 0) return tabs;
+      const to = target > from ? target - 1 : target;
+      if (to === from) return tabs;
+      const next = [...tabs];
+      const [tab] = next.splice(from, 1);
+      next.splice(to, 0, tab);
+      return next;
+    });
+  }
+
+  function onDragEnd() {
+    draggedId = null;
+    dropIndex = null;
+    stopAutoScroll();
+  }
 </script>
 
 <div class="tabbar-wrap" class:fade-left={showLeft} class:fade-right={showRight}>
-  <div class="tabbar" bind:this={tabbarEl} on:scroll={measure} on:wheel={onWheel}>
-    {#each $openTabs as tab (tab.id)}
+  <div
+    class="tabbar"
+    bind:this={tabbarEl}
+    on:scroll={measure}
+    on:wheel={onWheel}
+    on:dragover={onDragOver}
+    on:dragleave={onDragLeave}
+    on:drop={onDrop}
+  >
+    {#each $openTabs as tab, i (tab.id)}
+      {#if dropIndex === i && draggedId !== null && draggedId !== tab.id}
+        <div class="drop-indicator" aria-hidden="true" />
+      {/if}
       <div
         class="tab"
         class:active={$activeTabId === tab.id}
+        class:dragging={draggedId === tab.id}
+        draggable="true"
+        on:dragstart={(e) => onDragStart(e, tab.id)}
+        on:dragend={onDragEnd}
         on:click={() => activeTabId.set(tab.id)}
         on:keydown={(e) => e.key === "Enter" && activeTabId.set(tab.id)}
         role="button"
@@ -70,6 +173,9 @@
         <button class="close" on:click|stopPropagation={() => closeNoteTab(tab.id)} aria-label="Close">×</button>
       </div>
     {/each}
+    {#if dropIndex === $openTabs.length && draggedId !== null}
+      <div class="drop-indicator" aria-hidden="true" />
+    {/if}
   </div>
   {#if hasOverflow}
     <div class="scroll-track" aria-hidden="true">
@@ -113,13 +219,9 @@
     overflow-x: auto;
     overflow-y: hidden;
     min-height: 32px;
-    scrollbar-width: none; /* Firefox */
+    scrollbar-width: none;
   }
-  .tabbar::-webkit-scrollbar {
-    /* Hide native scrollbar — never squish the tab strip. The fade
-       gradients above plus the custom thumb below convey scroll state. */
-    display: none;
-  }
+  .tabbar::-webkit-scrollbar { display: none; }
 
   .scroll-track {
     position: absolute;
@@ -153,9 +255,21 @@
     font-size: 12px;
     white-space: nowrap;
     flex-shrink: 0;
+    user-select: none;
   }
   .tab:hover { background: var(--bg-2); }
   .tab.active { background: var(--bg-0); color: white; }
+  .tab.dragging { opacity: 0.4; }
+
+  .drop-indicator {
+    width: 2px;
+    align-self: stretch;
+    background: var(--accent, #4a9eff);
+    border-radius: 1px;
+    flex-shrink: 0;
+    pointer-events: none;
+  }
+
   .dot { color: var(--dirty); font-size: 10px; }
   .mode {
     background: var(--bg-3);
