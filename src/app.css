@@ -35,7 +35,11 @@ button {
 button:hover { background: var(--bg-3); }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 6px; }
-::-webkit-scrollbar-thumb:hover { background: #44494f; }
+::-webkit-scrollbar-thumb {
+  background: rgba(80, 87, 99, 0.55);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(100, 108, 122, 0.8); }
+* { scrollbar-width: thin; scrollbar-color: rgba(80, 87, 99, 0.55) transparent; }

@@ -107,6 +107,18 @@
     ]);
   }
 
+  let scrolling = false;
+  let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function onScroll() {
+    scrolling = true;
+    if (scrollTimer !== null) clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      scrolling = false;
+      scrollTimer = null;
+    }, 1200);
+  }
+
   onMount(() => {
     if (import.meta.env.VITE_BACKEND === "mock") {
       ipc.pickWorkspace().then((p) => {
@@ -135,7 +147,7 @@
     <div class="empty">No workspace opened</div>
   {:else}
     <div class="folder-label" title={$workspacePath}>{$workspacePath}</div>
-    <div class="groups">
+    <div class="groups" class:scrolling on:scroll={onScroll}>
       {#if $notes.length === 0}
         <div class="empty-notes">No notes yet — click + to create one.</div>
       {:else}
@@ -193,6 +205,26 @@
     flex: 1;
     overflow-y: auto;
     padding: 4px 0;
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+  .groups::-webkit-scrollbar {
+    width: 5px;
+  }
+  .groups::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 3px;
+    transition: background 0.25s ease;
+  }
+  .groups:hover::-webkit-scrollbar-thumb,
+  .groups.scrolling::-webkit-scrollbar-thumb {
+    background: rgba(80, 87, 99, 0.6);
+  }
+  .groups:hover {
+    scrollbar-color: rgba(80, 87, 99, 0.6) transparent;
+  }
+  .groups.scrolling {
+    scrollbar-color: rgba(80, 87, 99, 0.6) transparent;
   }
   .empty, .empty-notes {
     padding: 20px;
