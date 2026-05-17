@@ -113,7 +113,18 @@
   // accelerators before the webview sees them, so we can't rely on
   // onKeyDown alone — the menu bridge is the source of truth.
   let lastMenuSeq = -1;
+  // Svelte stores deliver the current value synchronously to new
+  // subscribers. When this editor mounts mid-session (tab switch
+  // remounts via {#key}), the store may already hold a stale event from
+  // an earlier menu action — without this guard, switching tabs would
+  // re-run the most recent action (e.g. Select All) on the new tab.
+  let menuSubReady = false;
   const stopMenuSub = menuAction.subscribe((ev) => {
+    if (!menuSubReady) {
+      menuSubReady = true;
+      if (ev) lastMenuSeq = ev.seq;
+      return;
+    }
     if (!ev || ev.seq === lastMenuSeq) return;
     lastMenuSeq = ev.seq;
     switch (ev.action) {
