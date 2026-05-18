@@ -265,7 +265,6 @@ export function keymap(e: KeyboardEvent, pageLines: number): Command | null {
     if (k === "Backspace") return { type: "backspace" };
     if (k === "Delete") return { type: "delete" };
     if (k === "Enter") return { type: "newline" };
-    if (k === "Tab") return { type: "insert", text: "\t" };
   }
   return null;
 }

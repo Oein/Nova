@@ -445,6 +445,19 @@
       closeFind();
       return;
     }
+    // Tab inserts soft-tab spaces to reach the next TABSIZE-column boundary.
+    // Using literal \t would cause CSS tab-size rendering to diverge from the
+    // JavaScript cursor-position calculation (visualPx), producing a mismatch
+    // between where the caret appears and where rendered text begins.
+    if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      if (buffer.editable) {
+        const { from } = ordered(primary(cursor));
+        const spaces = TABSIZE - (from.col % TABSIZE);
+        dispatch({ type: "insert", text: " ".repeat(spaces) });
+      }
+      return;
+    }
     const cmd = keymap(e, pageLines);
     if (cmd) {
       e.preventDefault();
