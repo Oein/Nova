@@ -137,9 +137,15 @@
       case "edit:redo":
         dispatch({ type: "redo" });
         return;
-      case "edit:select-all":
-        dispatch({ type: "select_all" });
+      case "edit:select-all": {
+        const active = document.activeElement as HTMLElement | null;
+        if (active && active !== inputEl && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+          (active as HTMLInputElement).select();
+        } else {
+          dispatch({ type: "select_all" });
+        }
         return;
+      }
       case "edit:find":
         openFind(false);
         return;
