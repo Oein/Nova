@@ -63,6 +63,8 @@
   let cjkWidth = $metrics.cjkWidth;
   let composing = false;
   let compositionText = "";
+  // Tab pressed while IME was composing — insert after composition ends.
+  let pendingTab = false;
 
   // Find / Replace state. All held in-component (not a store) because every
   // piece is tightly coupled to this editor's buffer + cursor.
@@ -433,7 +435,21 @@
   }
 
   function onKeyDown(e: KeyboardEvent) {
-    if (composing || e.isComposing || e.key === "Process" || e.keyCode === 229) return;
+    if (composing || e.isComposing || e.key === "Process" || e.keyCode === 229) {
+      // Tab during IME composition: record it so we can insert after composition
+      // ends on platforms that don't re-fire the Tab keydown post-compositionend.
+      if (e.key === "Tab") pendingTab = true;
+      return;
+    }
+    // Tab re-fired by the platform after compositionend — or ordinary Tab.
+    // Either way, handle it and clear the pending flag (prevents double-insert
+    // on platforms that re-fire after we already scheduled it in compositionend).
+    if (e.key === "Tab") {
+      pendingTab = false;
+      e.preventDefault();
+      dispatch({ type: "insert", text: "\t" });
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
       e.preventDefault();
       saveActive();
@@ -511,6 +527,19 @@
     const text = (inputEl?.value ?? "") || (e.data ?? "");
     if (inputEl) inputEl.value = "";
     if (text) dispatch({ type: "insert", text });
+    if (pendingTab) {
+      // On platforms that re-fire a Tab keydown after compositionend, the
+      // keydown handler will clear pendingTab and insert the tab there.
+      // On platforms that don't re-fire (Tab is only seen during composition),
+      // we insert it here after giving the event loop one turn to catch any
+      // re-fired keydown.
+      requestAnimationFrame(() => {
+        if (pendingTab) {
+          pendingTab = false;
+          dispatch({ type: "insert", text: "\t" });
+        }
+      });
+    }
   }
 
   function onPaste(e: ClipboardEvent) {
@@ -770,6 +799,27 @@
     totalVisualRows,
     lineYOffset,
   );
+
+  // Pixel x-position at the END of the preedit text, starting from startX.
+  // Used to place the hidden textarea at the IME cursor (after preedit), so
+  // the candidate window appears in the right place during composition.
+  function preeditEndX(startX: number, text: string): number {
+    if (!text) return startX;
+    const tabPx = TABSIZE * chWidth;
+    let x = startX;
+    for (const g of graphemes(text)) {
+      if (g.text === "\t") {
+        x = (Math.floor(x / tabPx) + 1) * tabPx;
+      } else {
+        x += graphemePx(g.text);
+      }
+    }
+    return x;
+  }
+
+  // During composition, position the hidden input at the end of the preedit so
+  // the IME candidate window appears after the composing text, not before it.
+  $: inputLeft = composing ? preeditEndX(caret.xPx, compositionText) : caret.xPx;
 
   $: spanList = pin(computeSpans(cursor, visibleStart, visibleEnd), chWidth, cjkWidth);
 
@@ -1245,7 +1295,7 @@
         on:copy|stopPropagation={onCopy}
         on:cut|stopPropagation={onCut}
         on:blur={onInputBlur}
-        style="top: {caret.yRow * rowHeight}px; left: {caret.xPx}px; height: {rowHeight}px"
+        style="top: {caret.yRow * rowHeight}px; left: {inputLeft}px; height: {rowHeight}px"
       ></textarea>
     </div>
   </div>
