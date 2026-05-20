@@ -1276,7 +1276,7 @@
       {/each}
       <div
         class="caret"
-        style="top: {caret.yRow * rowHeight}px; height: {rowHeight}px; left: {caret.xPx}px"
+        style="top: {caret.yRow * rowHeight}px; height: {rowHeight}px; left: {inputLeft}px"
       />
       <textarea
         bind:this={inputEl}
