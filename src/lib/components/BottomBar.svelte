@@ -1,16 +1,21 @@
 <script lang="ts">
   import { editorStatus } from "$lib/stores/editorStatus";
   import { trashPanelOpen } from "$lib/stores/trashPanel";
+  import { themePanelOpen } from "$lib/stores/theme";
 
   function openTrash() {
     trashPanelOpen.set(true);
+  }
+
+  function toggleTheme() {
+    themePanelOpen.update((v) => !v);
   }
 </script>
 
 <footer>
   <div class="left">
     <button
-      class="trash"
+      class="footer-btn"
       on:click={openTrash}
       title="Open trash"
       aria-label="Open trash"
@@ -34,6 +39,33 @@
         <path d="M9.5 7v4" />
       </svg>
       <span>Trash</span>
+    </button>
+
+    <button
+      class="footer-btn"
+      class:active={$themePanelOpen}
+      on:click={toggleTheme}
+      title="테마 색상 변경"
+      aria-label="테마 색상 변경"
+    >
+      <svg
+        class="icon"
+        viewBox="0 0 16 16"
+        width="12"
+        height="12"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.4"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="8" cy="8" r="5.5" />
+        <circle cx="5.5" cy="6" r="1.2" fill="currentColor" stroke="none" />
+        <circle cx="10.5" cy="6" r="1.2" fill="currentColor" stroke="none" />
+        <circle cx="8" cy="11" r="1.2" fill="currentColor" stroke="none" />
+      </svg>
+      <span>테마</span>
     </button>
   </div>
   <div class="right">
@@ -66,6 +98,7 @@
     display: flex;
     align-items: center;
     padding: 0 6px;
+    gap: 2px;
   }
   .right {
     display: flex;
@@ -74,7 +107,7 @@
     padding: 0 10px;
     font-family: var(--font-mono);
   }
-  .trash {
+  .footer-btn {
     background: transparent;
     border: none;
     color: var(--fg-2);
@@ -86,9 +119,12 @@
     align-items: center;
     gap: 4px;
   }
-  .trash:hover {
+  .footer-btn:hover {
     background: var(--bg-2);
     color: var(--fg-0);
+  }
+  .footer-btn.active {
+    color: var(--accent);
   }
   .icon { display: block; }
 </style>

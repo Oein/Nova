@@ -27,6 +27,8 @@
   import { confirmDelete } from "$lib/stores/confirmDelete";
   import { initMenuBridge, menuAction } from "$lib/menu";
   import { get } from "svelte/store";
+  import ThemePanel from "$lib/components/ThemePanel.svelte";
+  import { themeColors, themePanelOpen, applyTheme } from "$lib/stores/theme";
 
   let stopAutoflush: (() => void) | null = null;
   let stopMenuBridge: (() => void) | null = null;
@@ -232,7 +234,11 @@
   }
 
   let stopFontSub: (() => void) | null = null;
+  let stopThemeSub: (() => void) | null = null;
   onMount(() => {
+    // Apply saved theme immediately so colors are correct before first paint
+    applyTheme(get(themeColors));
+    stopThemeSub = themeColors.subscribe((colors) => applyTheme(colors));
     stopFontSub = editorFontSize.subscribe((fs) => measureMetrics(fs));
     stopAutoflush = startSessionAutoflush();
     // Subscribe to menu events. Skip the initial null value the store
@@ -264,6 +270,7 @@
   onDestroy(() => {
     if (stopAutoflush) stopAutoflush();
     if (stopFontSub) stopFontSub();
+    if (stopThemeSub) stopThemeSub();
     if (stopMenuSub) stopMenuSub();
     if (stopMenuBridge) stopMenuBridge();
     window.removeEventListener("keydown", onGlobalKey, true);
@@ -316,6 +323,9 @@
 <TrashPanel />
 <Spotlight />
 <ContextMenu />
+{#if $themePanelOpen}
+  <ThemePanel />
+{/if}
 
 <style>
   .shell {
