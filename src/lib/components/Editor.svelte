@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
+  import { get } from "svelte/store";
   import type { Buffer, BufferChange } from "$lib/editor/buffer/Buffer";
   import type { OpenTab } from "$lib/types";
   import { RopeBuffer } from "$lib/editor/buffer/RopeBuffer";
@@ -13,6 +14,7 @@
   import { saveActive } from "$lib/tabManager";
   import { updateCursor, updateScroll, getTabRuntime } from "$lib/sessionManager";
   import { editorStatus } from "$lib/stores/editorStatus";
+  import { revealRequest } from "$lib/stores/reveal";
   import { menuAction } from "$lib/menu";
 
   export let buffer: Buffer;
@@ -156,10 +158,29 @@
         return;
     }
   });
+
+  // Spotlight (Cmd+K) "open + reveal" requests. A request set before this
+  // editor mounts (the common case — the note opens in a fresh tab) is held
+  // until onMount, where the viewport and wrap geometry are ready; the
+  // subscription only handles requests that arrive while already mounted
+  // (revealing in a note that was already open). `revealMatch` clears the
+  // store on consume, and an id mismatch is ignored, so requests never replay
+  // on an unrelated tab.
+  let mounted = false;
+  function maybeReveal(req: { id: string; query: string } | null) {
+    if (!req || req.id !== tab.id) return;
+    revealRequest.set(null);
+    void revealMatch(req.query);
+  }
+  const stopRevealSub = revealRequest.subscribe((req) => {
+    if (!mounted) return;
+    maybeReveal(req);
+  });
   onDestroy(() => {
     if (unsub) unsub();
     viewportRO?.disconnect();
     stopMenuSub();
+    stopRevealSub();
     editorStatus.set(null);
   });
 
@@ -347,6 +368,11 @@
     // Some webviews (WKWebView) silently reject focus on an off-screen
     // contenteditable before first paint; retry after a frame.
     setTimeout(focusInput, 30);
+    // Geometry is ready — consume any pending Spotlight reveal (set before
+    // this mount). Overrides the restored scroll above so the match lands in
+    // view. Subsequent requests arrive via the live subscription.
+    mounted = true;
+    maybeReveal(get(revealRequest));
   });
 
   function focusInput() {
@@ -754,6 +780,51 @@
     } else {
       viewport.scrollLeft = 0;
     }
+  }
+
+  // Center a (line, col) in the viewport. Unlike scrollCaretIntoView — which
+  // only nudges the minimum amount — a jump from search should land the match
+  // comfortably in view, so we center it (clamped to the scrollable range).
+  // `sideHeight` (totalVisualRows * rowHeight) is used instead of the DOM's
+  // scrollHeight so this is correct even before Svelte reflows the spacer.
+  function scrollPosCentered(line: number, col: number) {
+    if (!viewport) return;
+    const cv = caretVisual(line, col);
+    const y = cv.yRow * rowHeight;
+    const maxScroll = Math.max(0, totalVisualRows * rowHeight - viewport.clientHeight);
+    const target = y - viewport.clientHeight / 2 + rowHeight / 2;
+    viewport.scrollTop = Math.max(0, Math.min(target, maxScroll));
+    scrollTop = viewport.scrollTop;
+    recomputeVisible();
+  }
+
+  // Jump to and select the first occurrence of `query` (case-insensitive) in
+  // the buffer. Driven by the Spotlight (Cmd+K) reveal request so opening a
+  // search hit scrolls to the matched text. Matching is per-line — the same
+  // basis as Find/Replace's recomputeMatches — so multi-line queries won't
+  // resolve, which is fine for the single-token queries search produces.
+  async function revealMatch(query: string) {
+    const q = query.toLowerCase();
+    if (!q) return;
+    let found: { line: number; startCol: number } | null = null;
+    for (let l = 0; l < buffer.lineCount; l++) {
+      const idx = buffer.getLine(l).toLowerCase().indexOf(q);
+      if (idx !== -1) {
+        found = { line: l, startCol: idx };
+        break;
+      }
+    }
+    if (!found) return;
+    const from = { line: found.line, col: found.startCol };
+    const to = { line: found.line, col: found.startCol + query.length };
+    cursor = withPrimary(cursor, { anchor: from, head: to });
+    publishStatus(cursor);
+    updateCursor(tab.id, to.line, to.col);
+    // Wait for any pending reflow (e.g. fresh mount) so caretVisual and the
+    // scroll range are accurate, then center the match and focus the editor.
+    await tick();
+    scrollPosCentered(found.line, found.startCol);
+    focusInput();
   }
 
   // After an edit, Svelte hasn't yet resized the scroll container's
