@@ -1,0 +1,142 @@
+name: release
+
+# Nova 데스크톱 앱 빌드 + 릴리즈.
+# macOS → .dmg (arm64), Windows → .exe (x64) 빌드 후 Releaser에 업로드.
+# - Actions 탭에서 "Run workflow" (workflow_dispatch)
+# - 또는 v* 태그 push 시 자동 실행 (예: git tag v0.1.0 && git push origin v0.1.0)
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '버전 (예: v1.0.0)'
+        required: true
+        type: string
+      type:
+        description: '릴리즈 타입'
+        required: true
+        type: choice
+        default: release
+        options:
+          - release
+          - beta
+          - dev
+      description:
+        description: '릴리즈 노트'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            bundles: dmg
+            bundle-dir: dmg
+            ext: dmg
+            artifact: Nova-macos-arm64.dmg
+          - os: windows-latest
+            bundles: nsis
+            bundle-dir: nsis
+            ext: exe
+            artifact: Nova-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="${{ github.ref_name }}"
+          fi
+          # tauri.conf.json / Cargo 는 'v' 없는 semver 를 요구
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "semver=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set app version
+        shell: bash
+        run: |
+          SEMVER="${{ steps.ver.outputs.semver }}"
+          if [[ "$SEMVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            tmp=$(mktemp)
+            jq --arg v "$SEMVER" '.version = $v' src-tauri/tauri.conf.json > "$tmp"
+            mv "$tmp" src-tauri/tauri.conf.json
+            echo "tauri.conf.json version -> $SEMVER"
+          else
+            echo "::warning::'$SEMVER' is not a valid semver, keeping tauri.conf.json version"
+          fi
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build Tauri app
+        run: npx tauri build --bundles ${{ matrix.bundles }}
+        env:
+          # 코드 서명 비활성화 (서명 인증서 미설정)
+          TAURI_SIGNING_PRIVATE_KEY: ""
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          src=$(ls src-tauri/target/release/bundle/${{ matrix.bundle-dir }}/*.${{ matrix.ext }} | head -n 1)
+          mv "$src" "src-tauri/target/release/bundle/${{ matrix.bundle-dir }}/${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-${{ matrix.os }}
+          path: src-tauri/target/release/bundle/${{ matrix.bundle-dir }}/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version
+        id: ver
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="${{ github.ref_name }}"
+          fi
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: Oein/releaser@main
+        with:
+          url: https://oein.fyi
+          api-key: ${{ secrets.RELEASER_API_KEY }}
+          project: ${{ secrets.RELEASER_PROJECT }}
+          version: ${{ steps.ver.outputs.value }}
+          type: ${{ inputs.type || 'release' }}
+          description: ${{ inputs.description }}
+          files: |
+            dist/*.exe
+            dist/*.dmg
