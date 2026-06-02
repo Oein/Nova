@@ -3,6 +3,7 @@
   import { get } from "svelte/store";
   import { ipc } from "$lib/ipc";
   import { spotlightOpen } from "$lib/stores/spotlight";
+  import { revealRequest } from "$lib/stores/reveal";
   import { openNote } from "$lib/tabManager";
   import { openTabs, getBuffer } from "$lib/stores/tabs";
   import { toast } from "$lib/stores/ui";
@@ -99,9 +100,15 @@
   async function openSelected() {
     const hit = hits[selected];
     if (!hit) return;
+    // Capture before close() clears it — used to scroll the editor to the
+    // matched text once the note is open.
+    const q = query.trim();
     close();
     try {
       await openNote(hit.id);
+      // Only meaningful when the hit had a body match to jump to. Title-only
+      // hits still set this; the editor simply finds no occurrence and stays put.
+      if (q) revealRequest.set({ id: hit.id, query: q });
     } catch (err) {
       console.error(err);
       toast("Failed to open note");
