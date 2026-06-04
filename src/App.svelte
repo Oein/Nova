@@ -9,7 +9,10 @@
   import TrashPanel from "$lib/components/TrashPanel.svelte";
   import Spotlight from "$lib/components/Spotlight.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
+  import Settings from "$lib/components/Settings.svelte";
   import { spotlightOpen } from "$lib/stores/spotlight";
+  import { settingsOpen } from "$lib/stores/settings";
+  import { startAutoSave } from "$lib/autoSave";
   import { measureMetrics, metrics } from "$lib/editor/measure";
   import { editorFontSize, zoomIn, zoomOut, zoomReset } from "$lib/editor/fontSize";
   import {
@@ -29,6 +32,7 @@
   import { get } from "svelte/store";
 
   let stopAutoflush: (() => void) | null = null;
+  let stopAutoSave: (() => void) | null = null;
   let stopMenuBridge: (() => void) | null = null;
   let stopMenuSub: (() => void) | null = null;
 
@@ -97,6 +101,14 @@
       e.preventDefault();
       e.stopPropagation();
       spotlightOpen.update((v) => !v);
+      return;
+    }
+    if (e.key === ",") {
+      // Cmd/Ctrl+, — open Settings. On macOS the native menu also fires this
+      // via "app:settings"; this keydown path covers the web/dev runtime.
+      e.preventDefault();
+      e.stopPropagation();
+      settingsOpen.set(true);
       return;
     }
     if (e.key === "Backspace") {
@@ -192,6 +204,9 @@
   // same store.
   function handleMenuAction(action: string) {
     switch (action) {
+      case "app:settings":
+        settingsOpen.set(true);
+        return;
       case "view:toggle-sidebar":
         toggleSidebar();
         return;
@@ -235,6 +250,7 @@
   onMount(() => {
     stopFontSub = editorFontSize.subscribe((fs) => measureMetrics(fs));
     stopAutoflush = startSessionAutoflush();
+    stopAutoSave = startAutoSave();
     // Subscribe to menu events. Skip the initial null value the store
     // starts at; only act on each new emit.
     stopMenuSub = menuAction.subscribe((ev) => {
@@ -263,6 +279,7 @@
 
   onDestroy(() => {
     if (stopAutoflush) stopAutoflush();
+    if (stopAutoSave) stopAutoSave();
     if (stopFontSub) stopFontSub();
     if (stopMenuSub) stopMenuSub();
     if (stopMenuBridge) stopMenuBridge();
@@ -316,6 +333,7 @@
 <TrashPanel />
 <Spotlight />
 <ContextMenu />
+<Settings />
 
 <style>
   .shell {

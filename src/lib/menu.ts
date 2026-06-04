@@ -8,6 +8,7 @@ import { writable } from "svelte/store";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type MenuActionId =
+  | "app:settings"
   | "file:new-note"
   | "file:save"
   | "file:close-tab"
