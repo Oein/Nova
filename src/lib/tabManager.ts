@@ -145,7 +145,10 @@ export async function createAndOpenNote(): Promise<void> {
   scheduleSessionFlush();
 }
 
-export async function saveTab(id: string): Promise<boolean> {
+export async function saveTab(
+  id: string,
+  opts: { silent?: boolean } = {},
+): Promise<boolean> {
   const buf = getBuffer(id);
   if (!buf || !(buf instanceof RopeBuffer)) return false;
   const tab = get(openTabs).find((t) => t.id === id);
@@ -164,7 +167,9 @@ export async function saveTab(id: string): Promise<boolean> {
     buf.markSaved(note.mtimeMs);
     markTabDiskContent(id, content);
     await saveTabStateImmediate(id, { clearUnsaved: true });
-    toast("Saved");
+    // Auto-saves pass `silent` to avoid a "Saved" toast on every interval; the
+    // cleared dirty indicator is feedback enough. Failures always toast.
+    if (!opts.silent) toast("Saved");
     return true;
   } catch (err) {
     console.error(err);
