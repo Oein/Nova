@@ -10,6 +10,7 @@
   import Spotlight from "$lib/components/Spotlight.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import Settings from "$lib/components/Settings.svelte";
+  import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import { spotlightOpen } from "$lib/stores/spotlight";
   import { settingsOpen } from "$lib/stores/settings";
   import { startAutoSave } from "$lib/autoSave";
@@ -30,6 +31,8 @@
   import { confirmDelete } from "$lib/stores/confirmDelete";
   import { initMenuBridge, menuAction } from "$lib/menu";
   import { get } from "svelte/store";
+  import { fetchLatestUpdate } from "$lib/updater";
+  import { pendingUpdate, updateChannel } from "$lib/stores/update";
 
   let stopAutoflush: (() => void) | null = null;
   let stopAutoSave: (() => void) | null = null;
@@ -260,6 +263,10 @@
       stopMenuBridge = unlisten;
     });
     window.addEventListener("keydown", onGlobalKey, true);
+    // Check for updates in the background; failures are silently ignored.
+    fetchLatestUpdate(get(updateChannel))
+      .then((info) => { if (info) pendingUpdate.set(info); })
+      .catch(() => {});
     // In the packaged WKWebView the monospace probe sometimes measures while
     // fonts are still being substituted, producing an inflated chWidth that
     // pushes the caret past the real glyph advance. Re-measure once fonts are
@@ -334,6 +341,7 @@
 <Spotlight />
 <ContextMenu />
 <Settings />
+<UpdateBanner />
 
 <style>
   .shell {

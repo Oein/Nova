@@ -9,6 +9,8 @@
     AUTOSAVE_MIN_SEC,
     AUTOSAVE_MAX_SEC,
   } from "$lib/stores/settings";
+  import { pendingUpdate, updateChecking, updateError, updateDismissed, updateChannel } from "$lib/stores/update";
+  import { fetchLatestUpdate, preferredFile, fileDownloadUrl, UPDATE_CHANNELS } from "$lib/updater";
 
   // Local mirror of the interval so the number input can hold a transient /
   // out-of-range value while typing; committed (clamped) on blur or Enter.
@@ -53,6 +55,46 @@
       e.preventDefault();
       e.stopPropagation();
       close();
+    }
+  }
+
+  let currentVersion = "…";
+  $: if ($settingsOpen && currentVersion === "…") {
+    import("@tauri-apps/api/app")
+      .then(({ getVersion }) => getVersion())
+      .then((v) => { currentVersion = v; })
+      .catch(() => { currentVersion = "unknown"; });
+  }
+
+  async function checkUpdates() {
+    updateChecking.set(true);
+    updateError.set(null);
+    try {
+      const info = await fetchLatestUpdate($updateChannel);
+      if (info) {
+        pendingUpdate.set(info);
+        updateDismissed.set(false);
+      } else {
+        pendingUpdate.set(null);
+      }
+    } catch {
+      updateError.set("Failed to check for updates.");
+    } finally {
+      updateChecking.set(false);
+    }
+  }
+
+  async function openDownload() {
+    const update = $pendingUpdate;
+    if (!update) return;
+    const file = preferredFile(update.files);
+    const url = file ? fileDownloadUrl(update.version, file.id) : null;
+    if (!url) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("open_url", { url });
+    } catch {
+      window.open(url, "_blank");
     }
   }
 </script>
@@ -128,6 +170,48 @@
             Auto-save is off. Use ⌘S to save manually.
           {/if}
         </p>
+      </section>
+
+      <section>
+        <h3>Updates</h3>
+
+        <div class="row">
+          <span class="label">Current version</span>
+          <span class="value-mono">{currentVersion}</span>
+        </div>
+
+        <div class="row">
+          <span class="label">Update channel</span>
+          <select
+            bind:value={$updateChannel}
+            aria-label="Update channel"
+          >
+            {#each UPDATE_CHANNELS as ch (ch.value)}
+              <option value={ch.value}>{ch.label}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div class="row">
+          <button
+            class="btn-check"
+            on:click={checkUpdates}
+            disabled={$updateChecking}
+          >
+            {$updateChecking ? "Checking…" : "Check for Updates"}
+          </button>
+        </div>
+
+        {#if $updateError}
+          <p class="hint error">{$updateError}</p>
+        {:else if $pendingUpdate}
+          <p class="hint update-available">
+            {$pendingUpdate.version} ({$pendingUpdate.channel}) is available.
+            <button class="link-btn" on:click={openDownload}>Download</button>
+          </p>
+        {:else if !$updateChecking}
+          <p class="hint">Nova is up to date on the {$updateChannel} channel.</p>
+        {/if}
       </section>
     </div>
   </div>
@@ -244,5 +328,40 @@
     font-size: 11px;
     color: var(--fg-2);
     line-height: 1.5;
+  }
+  .value-mono {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-1);
+  }
+  .btn-check {
+    background: var(--bg-0);
+    color: var(--fg-0);
+    border: 1px solid var(--bg-3);
+    border-radius: 4px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .btn-check:hover:not(:disabled) {
+    border-color: var(--accent, #7aa2f7);
+    color: var(--accent, #7aa2f7);
+  }
+  .btn-check:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .hint.error { color: #f7768e; }
+  .hint.update-available { color: var(--accent, #7aa2f7); }
+  .link-btn {
+    background: transparent;
+    border: none;
+    color: var(--accent, #7aa2f7);
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 0;
+    text-decoration: underline;
   }
 </style>

@@ -189,6 +189,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::shell::open_url,
             commands::folder::open_folder,
             commands::folder::get_metadata,
             commands::folder::pick_folder,
