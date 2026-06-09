@@ -170,6 +170,7 @@ pub fn run() {
         .manage(state)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_http::init())
         .menu(|handle| build_menu(handle))
         .on_menu_event(|app, event| {
             let id = event.id().as_ref().to_string();

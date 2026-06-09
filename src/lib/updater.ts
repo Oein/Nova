@@ -37,6 +37,21 @@ function isNewer(remote: string, local: string): boolean {
   return rPatch > lPatch;
 }
 
+// Update checks hit an external host (oein.fyi). A raw browser `fetch` from
+// the Tauri webview is cross-origin (origin is `tauri://localhost`) and gets
+// blocked by CORS, surfacing as a generic "Failed to check for updates."
+// Tauri's HTTP plugin issues the request natively, bypassing CORS entirely.
+// Outside Tauri (dev:mock / web / tests) the plugin module is absent, so we
+// fall back to the global fetch.
+async function httpFetch(): Promise<typeof fetch> {
+  try {
+    const mod = await import("@tauri-apps/plugin-http");
+    return mod.fetch as unknown as typeof fetch;
+  } catch {
+    return fetch;
+  }
+}
+
 export async function getCurrentVersion(): Promise<string> {
   try {
     const { getVersion } = await import("@tauri-apps/api/app");
@@ -75,7 +90,8 @@ export async function fetchLatestUpdate(
 ): Promise<UpdateInfo | null> {
   const current = await getCurrentVersion();
   const path = channelPath(channel);
-  const res = await fetch(
+  const fetchFn = await httpFetch();
+  const res = await fetchFn(
     `${API_BASE}/projects/${PROJECT_ID}/versions/${path}`,
   );
   if (!res.ok) return null;
