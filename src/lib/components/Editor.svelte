@@ -464,7 +464,7 @@
     if (composing || e.isComposing || e.key === "Process" || e.keyCode === 229) {
       // Tab during IME composition: record it so we can insert after composition
       // ends on platforms that don't re-fire the Tab keydown post-compositionend.
-      if (e.key === "Tab") pendingTab = true;
+      if (e.key === "Tab" && !e.shiftKey) pendingTab = true;
       return;
     }
     // Tab re-fired by the platform after compositionend — or ordinary Tab.
@@ -473,7 +473,11 @@
     if (e.key === "Tab") {
       pendingTab = false;
       e.preventDefault();
-      dispatch({ type: "insert", text: "\t" });
+      if (e.shiftKey) {
+        dispatch({ type: "dedent" });
+      } else {
+        dispatch({ type: "insert", text: "\t" });
+      }
       return;
     }
     if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {

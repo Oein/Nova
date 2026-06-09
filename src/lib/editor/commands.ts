@@ -20,6 +20,7 @@ export type Command =
   | { type: "newline" }
   | { type: "backspace" }
   | { type: "delete" }
+  | { type: "dedent" }
   | { type: "select_all" }
   | { type: "undo" }
   | { type: "redo" };
@@ -136,6 +137,29 @@ export function applyCommand(ctx: EditorCtx, cmd: Command): CursorState {
       if (right.line === sel.head.line && right.col === sel.head.col) return ctx.cursor;
       buffer.applyEdit({ kind: "delete", from: sel.head, to: right });
       return ctx.cursor;
+    }
+    case "dedent": {
+      if (!editable) return ctx.cursor;
+      const minLine = Math.min(sel.anchor.line, sel.head.line);
+      const maxLine = Math.max(sel.anchor.line, sel.head.line);
+      // Track which lines actually had a tab removed so we can adjust col.
+      const removed = new Array<boolean>(maxLine - minLine + 1).fill(false);
+      // Delete in reverse so earlier-line offsets are still valid when we reach them.
+      for (let l = maxLine; l >= minLine; l--) {
+        if (buffer.getLine(l).startsWith("\t")) {
+          buffer.applyEdit({ kind: "delete", from: { line: l, col: 0 }, to: { line: l, col: 1 } });
+          removed[l - minLine] = true;
+        }
+      }
+      const adjustPos = (p: Pos): Pos => {
+        if (p.line < minLine || p.line > maxLine) return p;
+        if (!removed[p.line - minLine]) return p;
+        return { line: p.line, col: Math.max(0, p.col - 1) };
+      };
+      return withPrimary(ctx.cursor, {
+        anchor: adjustPos(sel.anchor),
+        head: adjustPos(sel.head),
+      });
     }
     case "select_all": {
       const lastLine = buffer.lineCount - 1;
