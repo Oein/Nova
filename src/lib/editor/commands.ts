@@ -20,6 +20,7 @@ export type Command =
   | { type: "newline" }
   | { type: "backspace" }
   | { type: "delete" }
+  | { type: "indent" }
   | { type: "dedent" }
   | { type: "select_all" }
   | { type: "undo" }
@@ -137,6 +138,18 @@ export function applyCommand(ctx: EditorCtx, cmd: Command): CursorState {
       if (right.line === sel.head.line && right.col === sel.head.col) return ctx.cursor;
       buffer.applyEdit({ kind: "delete", from: sel.head, to: right });
       return ctx.cursor;
+    }
+    case "indent": {
+      if (!editable) return ctx.cursor;
+      const minLine = Math.min(sel.anchor.line, sel.head.line);
+      const maxLine = Math.max(sel.anchor.line, sel.head.line);
+      for (let l = minLine; l <= maxLine; l++) {
+        buffer.applyEdit({ kind: "insert", at: { line: l, col: 0 }, text: "\t" });
+      }
+      return withPrimary(ctx.cursor, {
+        anchor: { line: sel.anchor.line, col: sel.anchor.col + 1 },
+        head: { line: sel.head.line, col: sel.head.col + 1 },
+      });
     }
     case "dedent": {
       if (!editable) return ctx.cursor;

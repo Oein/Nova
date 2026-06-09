@@ -473,8 +473,12 @@
     if (e.key === "Tab") {
       pendingTab = false;
       e.preventDefault();
+      const sel = primary(cursor);
+      const multiLine = sel.anchor.line !== sel.head.line;
       if (e.shiftKey) {
         dispatch({ type: "dedent" });
+      } else if (multiLine) {
+        dispatch({ type: "indent" });
       } else {
         dispatch({ type: "insert", text: "\t" });
       }
