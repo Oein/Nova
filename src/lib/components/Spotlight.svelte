@@ -18,12 +18,14 @@
   // Monotonic request id — late responses from a prior query are ignored
   // when a newer query has already started.
   let reqSeq = 0;
+  let lastSearchedQuery = "";
 
   function close() {
     spotlightOpen.set(false);
     query = "";
     hits = [];
     selected = 0;
+    lastSearchedQuery = "";
   }
 
   $: if ($spotlightOpen) {
@@ -86,7 +88,12 @@
       }
       const backendFiltered = res.filter((h) => !openIds.has(h.id));
       hits = [...liveHits, ...backendFiltered].slice(0, 30);
-      selected = 0;
+      // Only reset selection when the query itself changed; if the same query
+      // fires again (e.g. IME commit after ArrowDown) keep the user's position.
+      if (q !== lastSearchedQuery) {
+        selected = 0;
+        lastSearchedQuery = q;
+      }
     } catch (err) {
       if (mySeq !== reqSeq) return;
       console.error("search failed", err);
