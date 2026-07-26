@@ -10,10 +10,12 @@
   import Spotlight from "$lib/components/Spotlight.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import Settings from "$lib/components/Settings.svelte";
+  import NotionConflicts from "$lib/components/NotionConflicts.svelte";
   import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import { spotlightOpen } from "$lib/stores/spotlight";
   import { settingsOpen } from "$lib/stores/settings";
   import { startAutoSave } from "$lib/autoSave";
+  import { startNotionSync } from "$lib/notionSync";
   import { measureMetrics, metrics } from "$lib/editor/measure";
   import { editorFontSize, zoomIn, zoomOut, zoomReset } from "$lib/editor/fontSize";
   import {
@@ -36,6 +38,7 @@
 
   let stopAutoflush: (() => void) | null = null;
   let stopAutoSave: (() => void) | null = null;
+  let stopNotionSync: (() => void) | null = null;
   let stopMenuBridge: (() => void) | null = null;
   let stopMenuSub: (() => void) | null = null;
 
@@ -254,6 +257,9 @@
     stopFontSub = editorFontSize.subscribe((fs) => measureMetrics(fs));
     stopAutoflush = startSessionAutoflush();
     stopAutoSave = startAutoSave();
+    // Loads the workspace's Notion config, arms the periodic sync, and (if
+    // enabled) schedules the one-shot sync a couple of seconds after boot.
+    stopNotionSync = startNotionSync();
     // Subscribe to menu events. Skip the initial null value the store
     // starts at; only act on each new emit.
     stopMenuSub = menuAction.subscribe((ev) => {
@@ -287,6 +293,7 @@
   onDestroy(() => {
     if (stopAutoflush) stopAutoflush();
     if (stopAutoSave) stopAutoSave();
+    if (stopNotionSync) stopNotionSync();
     if (stopFontSub) stopFontSub();
     if (stopMenuSub) stopMenuSub();
     if (stopMenuBridge) stopMenuBridge();
@@ -341,6 +348,7 @@
 <Spotlight />
 <ContextMenu />
 <Settings />
+<NotionConflicts />
 <UpdateBanner />
 
 <style>

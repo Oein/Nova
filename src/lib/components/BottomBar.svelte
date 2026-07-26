@@ -2,6 +2,13 @@
   import { editorStatus } from "$lib/stores/editorStatus";
   import { trashPanelOpen } from "$lib/stores/trashPanel";
   import { settingsOpen } from "$lib/stores/settings";
+  import {
+    conflictPanelOpen,
+    notionConfig,
+    runSync,
+    syncProgress,
+    syncState,
+  } from "$lib/stores/notion";
 
   function openTrash() {
     trashPanelOpen.set(true);
@@ -10,6 +17,17 @@
   function openSettings() {
     settingsOpen.set(true);
   }
+
+  $: conflictCount = $notionConfig?.conflictCount ?? 0;
+  $: notionReady = Boolean(
+    $notionConfig?.enabled && $notionConfig?.tokenSet && $notionConfig?.databaseId,
+  );
+  $: syncLabel =
+    $syncState === "syncing"
+      ? $syncProgress
+        ? `Syncing ${$syncProgress.done}/${$syncProgress.total}`
+        : "Syncing…"
+      : "Sync with Notion";
 </script>
 
 <footer>
@@ -63,6 +81,47 @@
       </svg>
       <span>Settings</span>
     </button>
+    {#if notionReady}
+      <button
+        class="bar-btn"
+        class:spinning={$syncState === "syncing"}
+        on:click={() => runSync()}
+        disabled={$syncState === "syncing"}
+        title={syncLabel}
+        aria-label={syncLabel}
+        data-testid="notion-sync-status"
+      >
+        <svg
+          class="icon"
+          viewBox="0 0 16 16"
+          width="12"
+          height="12"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M13.5 8a5.5 5.5 0 0 1-9.4 3.9" />
+          <path d="M2.5 8a5.5 5.5 0 0 1 9.4-3.9" />
+          <path d="M11.9 1.6v2.5H9.4" />
+          <path d="M4.1 14.4v-2.5h2.5" />
+        </svg>
+        <span>{$syncState === "syncing" ? syncLabel : "Notion"}</span>
+      </button>
+    {/if}
+    {#if conflictCount > 0}
+      <button
+        class="bar-btn warn"
+        on:click={() => conflictPanelOpen.set(true)}
+        title="Resolve Notion conflicts"
+        aria-label="Resolve Notion conflicts"
+        data-testid="notion-conflict-badge"
+      >
+        <span>⚠ {conflictCount}</span>
+      </button>
+    {/if}
   </div>
   <div class="right">
     {#if $editorStatus}
@@ -119,5 +178,23 @@
     background: var(--bg-2);
     color: var(--fg-0);
   }
+  .bar-btn:disabled {
+    cursor: default;
+  }
+  .bar-btn.warn {
+    color: #e0af68;
+  }
+  .bar-btn.warn:hover {
+    color: #e0af68;
+  }
   .icon { display: block; }
+  .spinning .icon {
+    animation: spin 1.1s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spinning .icon { animation: none; }
+  }
 </style>

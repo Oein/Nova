@@ -1,6 +1,6 @@
 import { get } from "svelte/store";
 import { dirtyTabs } from "./stores/tabs";
-import { saveTab } from "./tabManager";
+import { flushDirtyTabs } from "./tabManager";
 import { autoSaveEnabled, autoSaveIntervalSec } from "./stores/settings";
 
 // Periodic disk auto-save. Distinct from the session autoflush in
@@ -15,18 +15,12 @@ let running = false;
 
 async function runAutoSave(): Promise<void> {
   if (running) return;
-  const ids = [...get(dirtyTabs)];
-  if (ids.length === 0) return;
+  if (get(dirtyTabs).size === 0) return;
   running = true;
   try {
-    for (const id of ids) {
-      // Re-check on each iteration: a manual save (or close) between scheduling
-      // and now may have cleaned/removed this tab.
-      if (!get(dirtyTabs).has(id)) continue;
-      // Silent — no "Saved" toast spam every interval. saveTab still surfaces
-      // failures, which are rare and worth knowing about.
-      await saveTab(id, { silent: true });
-    }
+    // Silent — no "Saved" toast spam every interval. `saveTab` still surfaces
+    // failures, which are rare and worth knowing about.
+    await flushDirtyTabs();
   } finally {
     running = false;
   }

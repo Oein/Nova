@@ -3,6 +3,7 @@ pub mod error;
 pub mod fs_util;
 pub mod jamo;
 pub mod line_index;
+pub mod notion;
 pub mod state;
 pub mod workspace;
 
@@ -219,6 +220,18 @@ pub fn run() {
             commands::workspace::set_active_tab,
             commands::workspace::remove_tab_state,
             commands::workspace::reveal_note,
+            commands::notion::notion_get_config,
+            commands::notion::notion_set_config,
+            commands::notion::notion_clear_token,
+            commands::notion::notion_test_connection,
+            commands::notion::notion_list_databases,
+            commands::notion::notion_sync,
+            commands::notion::notion_cancel_sync,
+            commands::notion::notion_list_conflicts,
+            commands::notion::notion_get_conflict,
+            commands::notion::notion_resolve_conflict,
+            commands::notion::notion_resolve_all,
+            commands::notion::notion_unlink_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

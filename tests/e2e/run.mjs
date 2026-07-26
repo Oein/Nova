@@ -49,6 +49,24 @@ async function runScenario(page, spec) {
 }
 
 async function main() {
+  // A stray dev server (e.g. one left behind by `tauri dev`) would keep port
+  // 1420 and serve the *non-mock* build, making every scenario fail for a
+  // reason that has nothing to do with the code under test. Refuse to guess.
+  try {
+    const res = await fetch(BASE, { signal: AbortSignal.timeout(1000) });
+    if (res.ok) {
+      console.error(
+        `Something is already serving ${BASE}. Stop it first ` +
+          `(\`lsof -ti:${PORT} | xargs kill\`) — the e2e run needs its own ` +
+          `mock-mode dev server.`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+  } catch {
+    // Nothing listening, which is what we want.
+  }
+
   const vite = spawn("npm", ["run", "dev:mock"], {
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env },

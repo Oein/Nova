@@ -48,6 +48,11 @@ impl Workspace {
             conn.execute("ALTER TABLE notes ADD COLUMN filename TEXT", [])
                 .map_err(map_sql_err)?;
         }
+        // Migration: timestamp property names, added after notion_config
+        // shipped. `CREATE TABLE IF NOT EXISTS` won't touch an existing table.
+        for col in ["created_prop", "updated_prop", "id_prop"] {
+            add_column_if_missing(&conn, "notion_config", col, "TEXT")?;
+        }
         let ws = Self {
             root: root.to_path_buf(),
             conn,
@@ -220,6 +225,31 @@ impl Workspace {
     }
 }
 
+/// Adds a column to an existing table when it isn't there yet. SQLite has no
+/// `ADD COLUMN IF NOT EXISTS`, so the pragma check is the idiom.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> AppResult<()> {
+    let present: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            params![table, column],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if present == 0 {
+        conn.execute(
+            &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, decl),
+            [],
+        )
+        .map_err(map_sql_err)?;
+    }
+    Ok(())
+}
+
 fn split_ext(name: &str) -> (&str, &str) {
     match name.rsplit_once('.') {
         Some((stem, ext)) => (stem, ext),
@@ -306,6 +336,81 @@ CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
     body_jamo_tight,
     body_jamo_loose,
     tokenize='trigram'
+);
+
+-- ---------------------------------------------------------------------------
+-- Notion sync. All four tables are new (never shipped without them), so
+-- `CREATE TABLE IF NOT EXISTS` in this batch is the whole migration — the
+-- pragma_table_info + ALTER dance above is only needed for adding columns to
+-- tables that already exist in the wild.
+-- ---------------------------------------------------------------------------
+
+-- Per-workspace connection settings. Single row pinned to id = 1.
+CREATE TABLE IF NOT EXISTS notion_config (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    token          TEXT,
+    database_id    TEXT,
+    database_title TEXT,
+    title_prop     TEXT NOT NULL DEFAULT 'Name',
+    -- Names of `date` properties to write Nova's note timestamps into.
+    -- NULL/empty means the user hasn't opted in.
+    created_prop   TEXT,
+    updated_prop   TEXT,
+    -- Name of a `rich_text` property holding the note's uuid, so a page can be
+    -- matched back to its note even if the local mapping is lost.
+    id_prop        TEXT,
+    enabled        INTEGER NOT NULL DEFAULT 0,
+    sync_on_start  INTEGER NOT NULL DEFAULT 1,
+    auto_sync      INTEGER NOT NULL DEFAULT 1,
+    interval_sec   INTEGER NOT NULL DEFAULT 900,
+    last_sync_ms   INTEGER,
+    last_status    TEXT
+);
+
+-- note <-> page mapping plus the 3-way merge baseline: "the last state at
+-- which both sides agreed". `base_remote_edited` is Notion's last_edited_time
+-- verbatim (second-granularity, bumped by our own writes) and is only used as
+-- a cheap prefilter for whether the page's blocks are worth fetching;
+-- `base_remote_hash` over the rendered markdown is what actually decides
+-- whether the remote content changed.
+CREATE TABLE IF NOT EXISTS notion_links (
+    note_id             TEXT PRIMARY KEY,
+    page_id             TEXT UNIQUE,
+    base_local_hash     TEXT NOT NULL DEFAULT '',
+    base_local_mtime_ms INTEGER NOT NULL DEFAULT 0,
+    base_remote_hash    TEXT NOT NULL DEFAULT '',
+    base_remote_edited  TEXT NOT NULL DEFAULT '',
+    last_synced_ms      INTEGER NOT NULL DEFAULT 0,
+    push_mode           TEXT NOT NULL DEFAULT 'rebuild',
+    state               TEXT NOT NULL DEFAULT 'ok',
+    last_error          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_notion_links_page ON notion_links(page_id);
+
+-- Raw JSON of blocks Nova can't represent as markdown. Pushing rebuilds a
+-- page's body from scratch (Notion has no block-move API), so these have to be
+-- replayed verbatim or the user loses their callouts/tables/toggles.
+CREATE TABLE IF NOT EXISTS notion_blocks (
+    note_id     TEXT NOT NULL,
+    block_id    TEXT NOT NULL,
+    ord         INTEGER NOT NULL,
+    block_type  TEXT NOT NULL,
+    raw_json    TEXT NOT NULL,
+    recreatable INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (note_id, block_id)
+);
+
+-- Unresolved conflicts, with both sides snapshotted at detection time so the
+-- resolution UI shows what was actually compared even if either side moves on.
+CREATE TABLE IF NOT EXISTS notion_conflicts (
+    note_id        TEXT PRIMARY KEY,
+    page_id        TEXT,
+    kind           TEXT NOT NULL,
+    local_content  TEXT,
+    remote_content TEXT,
+    local_title    TEXT,
+    remote_title   TEXT,
+    detected_ms    INTEGER NOT NULL
 );
 "#;
 
@@ -456,6 +561,30 @@ pub fn rename_note_file_if_title_changed(
         )
         .map_err(map_sql_err)?;
     Ok(new_path)
+}
+
+/// Overwrites a note's content from an external source (Notion pull) without
+/// the optimistic-concurrency check `write_note` does — the sync engine has
+/// already decided this content wins. Goes through the same rename + meta +
+/// FTS path as a normal save so the on-disk name, search index and note list
+/// all stay consistent. Returns the post-write `(mtime_ms, size)`.
+pub fn apply_remote_content(
+    ws: &Workspace,
+    id: &str,
+    content: &str,
+    title: &str,
+) -> AppResult<(i64, i64)> {
+    let path = ws.note_path(id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, content)?;
+    let final_path = rename_note_file_if_title_changed(ws, id, title)?;
+    let meta = std::fs::metadata(&final_path)?;
+    let mtime = crate::fs_util::mtime_ms(&meta);
+    let size = meta.len() as i64;
+    update_note_meta(ws, id, title, mtime, size, content)?;
+    Ok((mtime, size))
 }
 
 /// Soft-delete: moves the backing file from `notes/` to `trash/`, sets

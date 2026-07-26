@@ -17,6 +17,14 @@ pub enum AppError {
     InvalidLineRange { start: u64, end: u64 },
     #[error("invalid utf-8 at offset {offset}")]
     InvalidUtf8 { offset: u64 },
+    // Kept distinct from `Other` so the frontend can tell "your PAT is wrong"
+    // (401) from "that database isn't shared with the integration" (404).
+    #[error("notion api {status}: {message}")]
+    Notion { status: u16, message: String },
+    #[error("a Notion sync is already running")]
+    SyncBusy,
+    #[error("Notion sync cancelled")]
+    SyncCancelled,
     #[error("{0}")]
     Other(String),
 }

@@ -5,7 +5,21 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 const { saveTab } = vi.hoisted(() => ({
   saveTab: vi.fn(async (_id: string, _opts?: { silent?: boolean }) => true),
 }));
-vi.mock("./tabManager", () => ({ saveTab }));
+// `flushDirtyTabs` is the shared loop (auto-save and Notion sync both use it);
+// stub it over the mocked saveTab so the assertions below stay per-tab.
+vi.mock("./tabManager", async () => {
+  const { get } = await import("svelte/store");
+  const { dirtyTabs } = await import("./stores/tabs");
+  return {
+    saveTab,
+    flushDirtyTabs: async () => {
+      for (const id of [...get(dirtyTabs)]) {
+        if (!get(dirtyTabs).has(id)) continue;
+        await saveTab(id, { silent: true });
+      }
+    },
+  };
+});
 
 import { startAutoSave, __testing } from "./autoSave";
 import { dirtyTabs } from "./stores/tabs";

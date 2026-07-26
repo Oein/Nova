@@ -178,4 +178,136 @@ export const scenarios = [
       return { pass: hasToday && hasYesterday, detail: { headers } };
     })()`,
   },
+  {
+    id: "10_notion_sync_now",
+    title: "Sync now pulls a note and reports what happened",
+    body: /* js */ `(async () => {
+      await new Promise(r => setTimeout(r, 800));
+      // Connect the mock integration directly; the settings form is covered by
+      // scenario 12.
+      window.__mock.connectNotion();
+      // Reopen the workspace so the runner picks up the new config.
+      const openBtn = document.querySelector('[data-testid="notion-sync-status"]');
+      // Not visible yet — open Settings, which reloads the config on show.
+      document.querySelector('[aria-label="Open settings"]').click();
+      await new Promise(r => setTimeout(r, 400));
+      const syncBtn = document.querySelector('[data-testid="notion-sync-now"]');
+      if (!syncBtn) return { pass: false, detail: 'no sync button' };
+      syncBtn.click();
+      await new Promise(r => setTimeout(r, 700));
+      const report = document.querySelector('[data-testid="notion-last-report"]')?.textContent ?? '';
+      const pulled = window.__mock.getNote('note-2');
+      return {
+        pass: report.includes('1 pulled') && report.includes('2 conflict')
+              && pulled.content.includes('Updated in Notion'),
+        detail: { report, hadBadgeBefore: !!openBtn, pulledHead: pulled.content.slice(0, 30) },
+      };
+    })()`,
+  },
+  {
+    id: "11_notion_conflict_resolution",
+    title: "Conflict badge opens the resolver and 'Use Notion version' applies",
+    body: /* js */ `(async () => {
+      await new Promise(r => setTimeout(r, 800));
+      window.__mock.connectNotion();
+      document.querySelector('[aria-label="Open settings"]').click();
+      await new Promise(r => setTimeout(r, 400));
+      document.querySelector('[data-testid="notion-sync-now"]').click();
+      await new Promise(r => setTimeout(r, 700));
+      // Close Settings; the conflict badge should now be in the status bar.
+      document.querySelector('[aria-label="Close settings"]').click();
+      await new Promise(r => setTimeout(r, 200));
+      const badge = document.querySelector('[data-testid="notion-conflict-badge"]');
+      if (!badge) return { pass: false, detail: 'no conflict badge' };
+      badge.click();
+      await new Promise(r => setTimeout(r, 400));
+      const panel = document.querySelector('[data-testid="notion-conflicts"]');
+      const local = document.querySelector('[data-testid="conflict-local"]')?.textContent ?? '';
+      const remote = document.querySelector('[data-testid="conflict-remote"]')?.textContent ?? '';
+      const btn = document.querySelector('[data-resolution="keepRemote"]');
+      if (!btn) return { pass: false, detail: { panel: !!panel, local, remote } };
+      btn.click();
+      await new Promise(r => setTimeout(r, 600));
+      const note = window.__mock.getNote('note-1');
+      // One of the two conflicts is resolved, so the badge counts down rather
+      // than disappearing.
+      const badgeAfter = document.querySelector('[data-testid="notion-conflict-badge"]')
+        ?.textContent?.trim();
+      return {
+        pass: !!panel && remote.includes('The Notion version')
+              && note.content.includes('The Notion version') && badgeAfter === '⚠ 1',
+        detail: { localHead: local.slice(0, 30), noteHead: note.content.slice(0, 30), badgeAfter },
+      };
+    })()`,
+  },
+  {
+    id: "13_notion_bulk_resolve",
+    title: "Resolve-all applies one answer to every conflict, after confirming",
+    body: /* js */ `(async () => {
+      await new Promise(r => setTimeout(r, 800));
+      window.__mock.connectNotion();
+      document.querySelector('[aria-label="Open settings"]').click();
+      await new Promise(r => setTimeout(r, 400));
+      document.querySelector('[data-testid="notion-sync-now"]').click();
+      await new Promise(r => setTimeout(r, 700));
+      document.querySelector('[aria-label="Close settings"]').click();
+      await new Promise(r => setTimeout(r, 200));
+      const badge = document.querySelector('[data-testid="notion-conflict-badge"]');
+      const badgeText = badge?.textContent?.trim();
+      badge.click();
+      await new Promise(r => setTimeout(r, 400));
+      const bar = document.querySelector('[data-testid="notion-bulk"]');
+      if (!bar) return { pass: false, detail: 'no bulk bar' };
+      // Choosing a policy must ask before touching anything.
+      bar.querySelector('[data-policy="remote"]').click();
+      await new Promise(r => setTimeout(r, 150));
+      const stillThere = window.__mock.getNote('note-1').content.includes('Project notes');
+      const confirmBtn = document.querySelector('[data-testid="notion-bulk-confirm"]');
+      if (!confirmBtn) return { pass: false, detail: 'no confirm step' };
+      confirmBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      const note1 = window.__mock.getNote('note-1');
+      const panelGone = !document.querySelector('[data-testid="notion-conflicts"]');
+      return {
+        pass: badgeText === '⚠ 2' && stillThere
+              && note1.content.includes('The Notion version') && panelGone,
+        detail: { badgeText, confirmedFirst: stillThere, panelGone,
+                  note1: note1.content.slice(0, 30) },
+      };
+    })()`,
+  },
+  {
+    id: "12_notion_settings_flow",
+    title: "Saving a token loads databases and enables sync",
+    body: /* js */ `(async () => {
+      await new Promise(r => setTimeout(r, 800));
+      document.querySelector('[aria-label="Open settings"]').click();
+      await new Promise(r => setTimeout(r, 400));
+      const tokenInput = document.querySelector('[data-testid="notion-token"]');
+      if (!tokenInput) return { pass: false, detail: 'no token input' };
+      // Sync can't be switched on before a token and database exist.
+      const gatedAtStart = document.querySelector('[data-testid="notion-enabled"]').disabled;
+      // Svelte two-way binding listens for 'input'.
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(tokenInput, 'ntn_secrettoken');
+      tokenInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 100));
+      [...document.querySelectorAll('[data-testid="notion-settings"] button')]
+        .find(b => b.textContent.trim() === 'Save').click();
+      await new Promise(r => setTimeout(r, 600));
+      const dbSelect = document.querySelector('[data-testid="notion-database"]');
+      const options = [...(dbSelect?.options ?? [])].map(o => o.textContent.trim());
+      dbSelect.value = 'mock-db-1';
+      dbSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 400));
+      const enable = document.querySelector('[data-testid="notion-enabled"]');
+      enable.click();
+      await new Promise(r => setTimeout(r, 400));
+      return {
+        pass: gatedAtStart && options.includes('Mock Notes')
+              && !enable.disabled && enable.checked,
+        detail: { options, gatedAtStart, checked: enable.checked },
+      };
+    })()`,
+  },
 ];
