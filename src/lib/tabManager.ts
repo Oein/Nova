@@ -178,6 +178,66 @@ export async function saveTab(
   }
 }
 
+/**
+ * Writes every dirty tab to disk and resolves once they've all landed.
+ *
+ * Both the auto-save loop and the Notion sync runner go through here. Sync in
+ * particular *must* call this first: the engine compares on-disk content, so an
+ * unsaved buffer would look like "no local change" and a remote edit would
+ * silently win.
+ */
+export async function flushDirtyTabs(): Promise<void> {
+  for (const id of [...get(dirtyTabs)]) {
+    // Re-check each time: a manual save (or close) between scheduling and now
+    // may have cleaned or removed this tab.
+    if (!get(dirtyTabs).has(id)) continue;
+    await saveTab(id, { silent: true });
+  }
+}
+
+/**
+ * Replays a note's on-disk content into its open buffer after something else
+ * (a Notion pull) rewrote the file.
+ *
+ * Applies one whole-document edit rather than swapping the buffer object,
+ * because `EditorPane` keys the editor on the tab id — a replacement buffer
+ * for the same id would never reach the view. Going through `applyEdit` also
+ * means the overwrite lands on the undo stack, so it's recoverable.
+ *
+ * Refuses to touch a dirty tab: unsaved work outranks a background refresh.
+ */
+export async function reloadTabFromDisk(id: string): Promise<boolean> {
+  const buf = getBuffer(id);
+  if (!buf || !(buf instanceof RopeBuffer)) return false;
+  if (get(dirtyTabs).has(id)) return false;
+  try {
+    const disk = await ipc.readNote(id);
+    if (disk.content !== buf.toString()) {
+      const lastLine = buf.lineCount - 1;
+      buf.applyEdit({
+        kind: "delete",
+        from: { line: 0, col: 0 },
+        to: { line: lastLine, col: buf.getLine(lastLine).length },
+      });
+      buf.applyEdit({ kind: "insert", at: { line: 0, col: 0 }, text: disk.content });
+    }
+    buf.markSaved(disk.mtimeMs);
+    markDirty(id, false);
+    markTabDiskContent(id, disk.content);
+    openTabs.update((t) =>
+      t.map((x) =>
+        x.id === id
+          ? { ...x, title: titleOf(id), mtimeMs: disk.mtimeMs, neverSaved: false }
+          : x,
+      ),
+    );
+    return true;
+  } catch (err) {
+    console.error("reload tab failed", id, err);
+    return false;
+  }
+}
+
 export async function saveActive(): Promise<void> {
   const id = get(activeTabId);
   if (!id) return;

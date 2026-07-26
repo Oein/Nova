@@ -11,6 +11,7 @@
   } from "$lib/stores/settings";
   import { pendingUpdate, updateChecking, updateError, updateDismissed, updateChannel } from "$lib/stores/update";
   import { fetchLatestUpdate, preferredFile, fileDownloadUrl, UPDATE_CHANNELS } from "$lib/updater";
+  import NotionSettings from "./NotionSettings.svelte";
 
   // Local mirror of the interval so the number input can hold a transient /
   // out-of-range value while typing; committed (clamped) on blur or Enter.
@@ -118,6 +119,10 @@
         <button class="close" on:click={close} aria-label="Close settings">✕</button>
       </header>
 
+      <!-- One scroll container for every section. Scrolling each section
+           separately (the previous behaviour) meant the panel could clip
+           content it had no way to reach. -->
+      <div class="body">
       <section>
         <h3>Auto-save</h3>
 
@@ -172,6 +177,8 @@
         </p>
       </section>
 
+      <NotionSettings />
+
       <section>
         <h3>Updates</h3>
 
@@ -213,6 +220,7 @@
           <p class="hint">Nova is up to date on the {$updateChannel} channel.</p>
         {/if}
       </section>
+      </div>
     </div>
   </div>
 {/if}
@@ -265,9 +273,15 @@
     background: var(--bg-2);
     color: var(--fg-0);
   }
+  .body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
   section {
     padding: 16px;
-    overflow-y: auto;
+    flex: none;
   }
   h3 {
     margin: 0 0 12px;
