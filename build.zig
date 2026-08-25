@@ -91,6 +91,29 @@ fn linkTextStack(b: *std.Build, mod: *std.Build.Module) void {
     mod.link_libcpp = true;
 }
 
+/// Turn off mingw's fortified string wrappers.
+///
+/// `_mingw.h` only defines them when the compiler reports optimization, so they
+/// appear in release builds and not in debug ones. Translating them trips a
+/// bug in translate-c: the generated wrapper declares a local `extern` struct
+/// for the checked function and never references it, which Zig rejects as an
+/// unused local constant. Nothing here calls `wcscat`/`strcpy` and friends
+/// through the C headers, so the fortified variants are pure loss.
+fn disableMingwFortify(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag != .windows) return;
+    mod.addCMacro("_FORTIFY_SOURCE", "0");
+}
+
+/// The macOS menu bar talks to AppKit through the Objective-C runtime, so both
+/// have to be linked. SDL happens to pull them in for its own Cocoa backend,
+/// but depending on that would leave the menu silently broken the day SDL's
+/// backend changes.
+fn linkMacosMenu(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (!target.result.os.tag.isDarwin()) return;
+    mod.linkSystemLibrary("objc", .{});
+    mod.linkFramework("AppKit", .{});
+}
+
 /// Assemble `Nova.app`.
 ///
 /// The bundle is pure file layout -- a binary, a plist and an icon in the right
@@ -188,6 +211,7 @@ pub fn build(b: *std.Build) void {
         .flags = &sqlite_flags,
     });
     db.addImport("core", core);
+    disableMingwFortify(db, target);
 
     // Per-OS glue: local time, opening URLs, revealing files.
     const platform = b.addModule("platform", .{
@@ -196,6 +220,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    linkMacosMenu(platform, target);
+    disableMingwFortify(platform, target);
 
     // Stage 4: networking -- the update check and Notion sync.
     const net = b.addModule("net", .{
@@ -228,6 +254,7 @@ pub fn build(b: *std.Build) void {
     });
     gfx.addImport("core", core);
     linkTextStack(b, gfx);
+    disableMingwFortify(gfx, target);
     // Fonts are compiled into the binary. See assets/fonts/README.md for why
     // Nova ships its own rather than asking the OS.
     gfx.addAnonymousImport("font_default", .{
@@ -279,6 +306,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    disableMingwFortify(exe.root_module, target);
     exe.root_module.addImport("core", core);
     exe.root_module.addImport("db", db);
     exe.root_module.addImport("app", app);
@@ -287,6 +315,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("platform", platform);
     exe.root_module.addImport("net", net);
     exe.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
+    linkMacosMenu(exe.root_module, target);
     b.installArtifact(exe);
 
     addMacosBundle(b, exe, target);

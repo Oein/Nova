@@ -160,6 +160,32 @@ pub const Db = struct {
     }
 };
 
+/// `SQLITE_TRANSIENT` tells SQLite to copy the bound bytes, so the caller's
+/// buffer may go away. sqlite3.h spells it `((sqlite3_destructor_type)-1)`: a
+/// sentinel SQLite compares against, never an address it calls. translate-c
+/// cannot cast it at comptime on targets where function pointers carry an
+/// alignment requirement -- aarch64 rejects it, x86_64 happens not to -- so the
+/// two binders that take a destructor are redeclared here with that parameter
+/// as an opaque pointer, which has no alignment to violate. The ABI is
+/// unchanged.
+const transient: ?*const anyopaque = @ptrFromInt(std.math.maxInt(usize));
+
+extern fn sqlite3_bind_text(
+    stmt: *c.sqlite3_stmt,
+    index: c_int,
+    text: [*]const u8,
+    n: c_int,
+    destructor: ?*const anyopaque,
+) c_int;
+
+extern fn sqlite3_bind_blob(
+    stmt: *c.sqlite3_stmt,
+    index: c_int,
+    value: *const anyopaque,
+    n: c_int,
+    destructor: ?*const anyopaque,
+) c_int;
+
 pub const Stmt = struct {
     stmt: *c.sqlite3_stmt,
     db: *Db,
@@ -200,24 +226,11 @@ pub const Stmt = struct {
     }
 
     pub fn bindText(self: *Stmt, i: c_int, v: []const u8) Error!void {
-        // SQLITE_TRANSIENT: SQLite copies, so the caller's buffer may go away.
-        try self.check(c.sqlite3_bind_text(
-            self.stmt,
-            i,
-            v.ptr,
-            @intCast(v.len),
-            c.SQLITE_TRANSIENT,
-        ));
+        try self.check(sqlite3_bind_text(self.stmt, i, v.ptr, @intCast(v.len), transient));
     }
 
     pub fn bindBlob(self: *Stmt, i: c_int, v: []const u8) Error!void {
-        try self.check(c.sqlite3_bind_blob(
-            self.stmt,
-            i,
-            v.ptr,
-            @intCast(v.len),
-            c.SQLITE_TRANSIENT,
-        ));
+        try self.check(sqlite3_bind_blob(self.stmt, i, v.ptr, @intCast(v.len), transient));
     }
 
     /// Bind a tuple of values positionally.
