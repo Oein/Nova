@@ -108,6 +108,16 @@ pub const FontStack = struct {
 
     px_size: u32,
     metrics: Metrics,
+    /// Whether the faces are laid out on a fixed cell grid.
+    ///
+    /// Note text is: the editor's whole coordinate system is cells, and
+    /// fallback faces are rescaled so a wide cell stays exactly two narrow
+    /// ones. Interface text is not -- the original let the browser space
+    /// `-apple-system` proportionally, and forcing it onto a grid is visible
+    /// as wrong tracking in every label.
+    grid: bool = true,
+    /// Font files read from disk, kept alive because FreeType does not copy.
+    owned: std.ArrayList([]u8) = .empty,
 
     glyphs: std.AutoHashMapUnmanaged(GlyphKey, Glyph) = .empty,
     coverage: std.ArrayList(u8) = .empty,
@@ -149,16 +159,19 @@ pub const FontStack = struct {
         while (it.next()) |k| self.gpa.free(k.*);
         self.cluster_cache.deinit(self.gpa);
 
+        for (self.owned.items) |buf| self.gpa.free(buf);
+        self.owned.deinit(self.gpa);
+
         _ = ft.FT_Done_FreeType(self.lib);
     }
 
-    fn openFace(self: *FontStack, data: []const u8) Error!Face {
+    fn openFace(self: *FontStack, data: []const u8, index: u32) Error!Face {
         var face: ft.FT_Face = null;
         const rc = ft.FT_New_Memory_Face(
             self.lib,
             data.ptr,
             @intCast(data.len),
-            0,
+            @intCast(index),
             &face,
         );
         if (rc != 0) return error.FontLoad;
@@ -178,12 +191,12 @@ pub const FontStack = struct {
     }
 
     fn addFace(self: *FontStack, regular: []const u8, bold: ?[]const u8) Error!void {
-        var face = try self.openFace(regular);
+        var face = try self.openFace(regular, 0);
         errdefer face.deinit();
 
         var bold_face: ?Face = null;
         if (bold) |b| {
-            bold_face = try self.openFace(b);
+            bold_face = try self.openFace(b, 0);
         } else {
             face.embolden_for_bold = true;
         }
@@ -196,8 +209,8 @@ pub const FontStack = struct {
     ///
     /// The bundled faces stay behind it, so a font that lacks Hangul (or lacks
     /// anything else) still renders every note.
-    pub fn prependFace(self: *FontStack, data: []const u8) Error!void {
-        var face = try self.openFace(data);
+    pub fn prependFace(self: *FontStack, data: []const u8, index: u32) Error!void {
+        var face = try self.openFace(data, index);
         errdefer face.deinit();
         face.embolden_for_bold = true;
 
@@ -205,6 +218,32 @@ pub const FontStack = struct {
         try self.bold_faces.insert(self.gpa, 0, null);
         self.invalidateCaches();
         self.recomputeMetrics();
+    }
+
+    /// Put a face read from a file at the head of the fallback chain.
+    ///
+    /// Returns false when the file cannot be read or is not a font FreeType
+    /// understands. That is not an error: the platform's faces are optional
+    /// decoration over the bundled one, and a missing file means the previous
+    /// head of the chain keeps the job.
+    pub fn prependFile(self: *FontStack, io: std.Io, path: []const u8, index: u32) bool {
+        const data = std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .limited(64 << 20)) catch return false;
+        var keep = false;
+        defer if (!keep) self.gpa.free(data);
+
+        var face = self.openFace(data, index) catch return false;
+        errdefer face.deinit();
+        face.embolden_for_bold = true;
+
+        self.owned.append(self.gpa, data) catch return false;
+        errdefer _ = self.owned.pop();
+        keep = true;
+
+        self.faces.insert(self.gpa, 0, face) catch return false;
+        self.bold_faces.insert(self.gpa, 0, null) catch return false;
+        self.invalidateCaches();
+        self.recomputeMetrics();
+        return true;
     }
 
     pub fn setPixelSize(self: *FontStack, px_size: u32) Error!void {
@@ -253,6 +292,7 @@ pub const FontStack = struct {
     /// visual weight between scripts, which is the correct trade: a grid that
     /// holds beats glyphs that are nominally the same point size.
     fn matchFallbackSizes(self: *FontStack) void {
+        if (!self.grid) return;
         if (self.faces.items.len < 2) return;
         const base: f64 = @floatFromInt(self.px_size);
 
@@ -322,6 +362,16 @@ pub const FontStack = struct {
             .ascent = scaled_ascent / 64.0 + (row_height - scaled_height / 64.0) / 2.0,
         };
         self.matchFallbackSizes();
+    }
+
+    /// Advance of one grapheme cluster as its own face measures it.
+    ///
+    /// This is what interface text is spaced by. Note text uses the cell grid
+    /// instead, so the caret and the glyphs agree by construction.
+    pub fn clusterAdvance(self: *FontStack, cluster: []const u8) f64 {
+        const r = self.resolveCluster(cluster) orelse return self.metrics.ch_width;
+        const adv = self.advanceInFace(r.face, r.index);
+        return if (adv > 0) adv else self.metrics.ch_width;
     }
 
     /// First face in the chain with a glyph for `cp`.
@@ -554,7 +604,7 @@ test "changing the pixel size rescales the metrics and clears the cache" {
 test "a user font goes to the head of the chain but keeps the fallback" {
     var fs = try FontStack.init(testing.allocator, 13);
     defer fs.deinit();
-    try fs.prependFace(bundled.default_regular);
+    try fs.prependFace(bundled.default_regular, 0);
 
     try testing.expectEqual(@as(usize, 2), fs.faces.items.len);
     try testing.expectEqual(@as(u8, 0), fs.resolveCodepoint('A').?.face);
@@ -568,7 +618,7 @@ test "a fallback is rescaled onto the primary face's grid" {
 
     // Stand in for a user font whose Latin cell is wider than D2Coding's, by
     // making the bundled face primary at a size that forces a rescale.
-    try fs.prependFace(bundled.default_regular);
+    try fs.prependFace(bundled.default_regular, 0);
     try fs.setPixelSize(20);
 
     // Both faces must agree on the narrow cell width after matching.

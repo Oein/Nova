@@ -25,10 +25,22 @@ fn centeredPanel(within: Rect, w: i32, h: i32, top_ratio: f32) Rect {
     return .{ .x = x, .y = y, .w = w, .h = h };
 }
 
-fn paintPanel(p: *Painter, rect: Rect, backdrop: gfx.Rgba, within: Rect) void {
+/// `border-radius` on the panels the original styled as floating cards.
+const radius = struct {
+    /// Settings and Spotlight.
+    const panel: f32 = 8;
+    /// Dialogs, the trash and conflict panels, the context menu, the toast.
+    const dialog: f32 = 6;
+    /// Buttons and inputs.
+    const control: f32 = 4;
+    /// Context-menu items and the small buttons in the trash panel.
+    const item: f32 = 3;
+};
+
+fn paintPanel(p: *Painter, rect: Rect, backdrop: gfx.Rgba, within: Rect, r: f32) void {
     p.fill(within, backdrop);
-    p.fill(rect, palette.bg_1);
-    p.stroke(rect, palette.bg_3);
+    p.fillRound(rect, r, palette.bg_1);
+    p.strokeRound(rect, r, 1, palette.bg_3);
 }
 
 // -- toast -------------------------------------------------------------------
@@ -69,8 +81,8 @@ pub const Toast = struct {
             .w = w,
             .h = 30,
         };
-        p.fill(rect, palette.bg_2);
-        p.stroke(rect, palette.bg_3);
+        p.fillRound(rect, radius.dialog, palette.bg_2);
+        p.strokeRound(rect, radius.dialog, 1, palette.bg_3);
         p.drawLabel(rect, msg, palette.fg_0, .center, .{});
     }
 };
@@ -113,7 +125,7 @@ pub const Confirm = struct {
 
     pub fn paint(self: Confirm, p: *Painter, within: Rect) void {
         const rect = panelRect(within);
-        paintPanel(p, rect, palette.backdrop, within);
+        paintPanel(p, rect, palette.backdrop, within, radius.dialog);
 
         p.drawEllipsized(
             .{ .x = rect.x + 20, .y = rect.y + 16, .w = rect.w - 40, .h = 20 },
@@ -167,8 +179,8 @@ fn paintButton(p: *Painter, rect: Rect, label: []const u8, style: Confirm.Button
         .plain => palette.fg_0,
         .primary, .danger => gfx.Rgba{ .r = 255, .g = 255, .b = 255 },
     };
-    p.fill(rect, bg);
-    if (style == .plain) p.stroke(rect, palette.bg_3);
+    p.fillRound(rect, radius.control, bg);
+    if (style == .plain) p.strokeRound(rect, radius.control, 1, palette.bg_3);
     p.drawLabel(rect, label, fg, .center, .{});
 }
 
@@ -203,8 +215,8 @@ pub const ContextMenu = struct {
     pub fn paint(self: ContextMenu, p: *Painter, within: Rect) void {
         if (!self.open) return;
         const r = self.rect(within);
-        p.fill(r, palette.bg_1);
-        p.stroke(r, palette.bg_3);
+        p.fillRound(r, radius.dialog, palette.bg_1);
+        p.strokeRound(r, radius.dialog, 1, palette.bg_3);
 
         var y = r.y + 4;
         for (self.items) |item| {
@@ -314,7 +326,7 @@ pub const Spotlight = struct {
     pub fn paint(self: *Spotlight, p: *Painter, within: Rect) void {
         if (!self.open) return;
         const rect = panelRect(within);
-        paintPanel(p, rect, palette.backdrop_light, within);
+        paintPanel(p, rect, palette.backdrop_light, within, radius.panel);
 
         // Query line.
         const input = Rect{ .x = rect.x, .y = rect.y, .w = rect.w, .h = input_h };
@@ -446,7 +458,7 @@ pub const TrashPanel = struct {
     pub fn paint(self: *TrashPanel, p: *Painter, within: Rect, now_ms: i64) void {
         if (!self.open) return;
         const rect = panelRect(within);
-        paintPanel(p, rect, palette.backdrop, within);
+        paintPanel(p, rect, palette.backdrop, within, radius.dialog);
 
         p.drawLabel(
             .{ .x = rect.x + 14, .y = rect.y + 10, .w = rect.w - 28, .h = 20 },
@@ -565,7 +577,7 @@ pub const Settings = struct {
     ) void {
         if (!self.open) return;
         const rect = panelRect(within);
-        paintPanel(p, rect, palette.backdrop_light, within);
+        paintPanel(p, rect, palette.backdrop_light, within, radius.panel);
 
         p.drawLabel(
             .{ .x = rect.x + 16, .y = rect.y + 12, .w = rect.w - 32, .h = 22 },
@@ -619,8 +631,8 @@ pub const Settings = struct {
         p.drawLabel(.{ .x = rect.x + 16, .y = y, .w = 120, .h = row_h }, label, palette.fg_1, .left, .{});
 
         const vr = Rect{ .x = rect.x + 146, .y = y, .w = rect.w - 162, .h = row_h };
-        p.fill(vr, palette.bg_0);
-        p.stroke(vr, palette.bg_3);
+        p.fillRound(vr, radius.control, palette.bg_0);
+        p.strokeRound(vr, radius.control, 1, palette.bg_3);
         p.drawEllipsized(vr.inset(4), value, palette.fg_0, .{});
     }
 };
@@ -885,7 +897,7 @@ pub const ConflictPanel = struct {
     pub fn paint(self: *ConflictPanel, p: *Painter, within: Rect) void {
         if (!self.open) return;
         const rect = panelRect(within);
-        paintPanel(p, rect, palette.backdrop, within);
+        paintPanel(p, rect, palette.backdrop, within, radius.dialog);
 
         p.drawLabel(
             .{ .x = rect.x + 14, .y = rect.y + 10, .w = rect.w - 28, .h = 20 },

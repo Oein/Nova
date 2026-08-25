@@ -625,7 +625,7 @@ const golden = @import("gfx").golden;
 const Fixture = struct {
     env: @import("db").fsx.TestEnv,
     application: app.state.App,
-    fonts: gfx.FontStack,
+    fonts: gfx.Fonts,
     surf: gfx.Surface,
     view: EditorView,
     root: []u8,
@@ -645,13 +645,13 @@ const Fixture = struct {
         self.* = .{
             .env = env,
             .application = app.state.App.init(gpa, env.io),
-            .fonts = try gfx.FontStack.init(gpa, 16),
+            .fonts = try gfx.Fonts.initBundled(gpa, .{ .editor_px = 16 }),
             .surf = try gfx.Surface.init(gpa, 420, 200),
             .view = undefined,
             .root = root,
             .gpa = gpa,
         };
-        self.view = EditorView.init(gpa, &self.fonts);
+        self.view = EditorView.init(gpa, self.fonts.get(.{ .kind = .mono }));
 
         try self.application.openWorkspace(root);
         const i = try self.application.createAndOpenNote();

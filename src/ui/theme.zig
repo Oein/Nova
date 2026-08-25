@@ -28,6 +28,14 @@ pub const statusbar_h: i32 = 22;
 pub const tabbar_h: i32 = 32;
 pub const tab_max_w: i32 = 200;
 pub const sidebar_row_h: i32 = 22;
+/// `.entry { font-size: 12px }` -- note titles are a step below the body.
+pub const sidebar_entry_font_px: u32 = 12;
+/// `.header { font-size: 11px; letter-spacing: 0.5px }`.
+pub const sidebar_group_font_px: u32 = 11;
+/// `.count { font-size: 10px }`, in a `border-radius: 8px` pill.
+pub const sidebar_count_font_px: u32 = 10;
+/// `footer { font-size: 11px }`.
+pub const status_font_px: u32 = 11;
 pub const sidebar_group_h: i32 = 22;
 
 /// Extra space around the gutter's digits (`Editor.svelte:946`).

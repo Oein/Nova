@@ -73,6 +73,8 @@ pub const palette = struct {
     pub const accent_dim = Rgba.hex("3d5a8a");
     pub const dirty = Rgba.hex("e0af68"); // unsaved dot, warnings
     pub const danger = Rgba.hex("f7768e");
+    /// `.entry.active { color: white }` -- brighter than `fg_0`, deliberately.
+    pub const white = Rgba.hex("ffffff");
 
     /// Selection fill: accent at 25% (`rgba(122,162,247,.25)`).
     pub const selection = accent.withAlpha(64);

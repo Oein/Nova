@@ -267,6 +267,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     gfx.addImport("core", core);
+    gfx.addImport("platform", platform);
     linkTextStack(b, gfx);
     disableMingwFortify(gfx, target);
     // Fonts are compiled into the binary. See assets/fonts/README.md for why

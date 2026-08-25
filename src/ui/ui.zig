@@ -3,6 +3,7 @@
 pub const event = @import("event.zig");
 pub const theme = @import("theme.zig");
 pub const editor_view = @import("editor_view.zig");
+pub const icons = @import("icons.zig");
 pub const chrome = @import("chrome.zig");
 pub const overlays = @import("overlays.zig");
 pub const find = @import("find.zig");
@@ -16,6 +17,7 @@ test {
     _ = event;
     _ = theme;
     _ = editor_view;
+    _ = icons;
     _ = chrome;
     _ = overlays;
     _ = find;

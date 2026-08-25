@@ -10,6 +10,7 @@ const app = @import("app");
 const db = @import("db");
 const ev = @import("event.zig");
 const theme = @import("theme.zig");
+const icons = @import("icons.zig");
 
 const Allocator = std.mem.Allocator;
 const Rect = gfx.Rect;
@@ -32,7 +33,13 @@ pub const Sidebar = struct {
     /// Anchor for shift-range selection.
     anchor: ?[]u8 = null,
 
-    hover_row: ?usize = null,
+    /// Where the pointer is, or null when it is outside the sidebar.
+    ///
+    /// Hover highlights are resolved during paint by testing each row's own
+    /// rectangle. That keeps them exact -- the same rectangle that is drawn is
+    /// the one that is tested -- without having to keep a row index in step
+    /// with a list that changes under it.
+    hover: ?struct { x: i32, y: i32 } = null,
 
     pub fn init(gpa: Allocator) Sidebar {
         return .{ .gpa = gpa };
@@ -244,29 +251,51 @@ pub const Sidebar = struct {
         now_ms: i64,
     ) void {
         const rect = Rect{ .x = self.rect.x, .y = y, .w = self.rect.w, .h = theme.sidebar_group_h };
-        p.drawLabel(
-            .{ .x = rect.x + 10, .y = rect.y, .w = 12, .h = rect.h },
-            if (collapsed) ">" else "v",
-            palette.fg_2,
-            .left,
-            .{},
-        );
-        p.drawEllipsized(
-            .{ .x = rect.x + 24, .y = rect.y, .w = rect.w - 60, .h = rect.h },
-            g.label(now_ms),
-            palette.fg_1,
-            .{},
-        );
+        if (self.hovers(rect)) p.fill(rect, palette.bg_2);
+
+        // `.chev { width: 10px }`, at the row's 10px left padding.
+        const chev = Rect{ .x = rect.x + 10, .y = rect.y + @divTrunc(rect.h - 10, 2), .w = 10, .h = 10 };
+        p.drawIcon(chev, if (collapsed) icons.chevron_right else icons.chevron_down, palette.fg_2);
+
+        var upper: [128]u8 = undefined;
+        const label = uppercaseAscii(g.label(now_ms), &upper);
 
         var buf: [16]u8 = undefined;
-        const count = std.fmt.bufPrint(&buf, "{d}", .{g.count()}) catch return;
-        p.drawLabel(
-            .{ .x = rect.right() - 34, .y = rect.y, .w = 24, .h = rect.h },
-            count,
-            palette.fg_2,
-            .right,
-            .{},
+        const count = std.fmt.bufPrint(&buf, "{d}", .{g.count()}) catch "";
+
+        // The count is a pill against the right edge; the label takes the rest.
+        const count_opts = Painter.RunOptions{ .family = .{ .px = theme.sidebar_count_font_px } };
+        const pill_w: i32 = @intFromFloat(@ceil(p.measureSpan(count, count_opts)) + 12);
+        const pill = Rect{
+            .x = rect.right() - 10 - pill_w,
+            .y = rect.y + @divTrunc(rect.h - 14, 2),
+            .w = pill_w,
+            .h = 14,
+        };
+        if (count.len > 0) {
+            p.fillRound(pill, 8, palette.bg_2);
+            p.drawLabel(pill, count, palette.fg_2, .center, count_opts);
+        }
+
+        p.drawEllipsized(
+            .{ .x = rect.x + 26, .y = rect.y, .w = pill.x - 6 - (rect.x + 26), .h = rect.h },
+            label,
+            palette.fg_1,
+            .{ .family = .{ .px = theme.sidebar_group_font_px }, .tracking = 0.5 },
         );
+    }
+
+    /// `text-transform: uppercase`, for the ASCII the date labels are made of.
+    /// Anything else is left alone, which is what the browser did with Hangul.
+    fn uppercaseAscii(text: []const u8, buf: []u8) []const u8 {
+        if (text.len > buf.len) return text;
+        for (text, 0..) |ch, i| buf[i] = std.ascii.toUpper(ch);
+        return buf[0..text.len];
+    }
+
+    fn hovers(self: *const Sidebar, rect: Rect) bool {
+        const h = self.hover orelse return false;
+        return rect.contains(h.x, h.y);
     }
 
     fn paintNoteRow(
@@ -280,24 +309,29 @@ pub const Sidebar = struct {
         const rect = Rect{ .x = self.rect.x, .y = y, .w = self.rect.w, .h = theme.sidebar_row_h };
         const is_active = active_id != null and std.mem.eql(u8, active_id.?, note.id);
 
-        // Active wins over selected, matching the CSS source order.
+        // Active wins over selected, which wins over hover, matching the CSS
+        // source order.
         if (is_active) {
             p.fill(rect, palette.accent_dim);
         } else if (self.isSelected(note.id)) {
             p.fill(rect, palette.bg_3);
+        } else if (self.hovers(rect)) {
+            p.fill(rect, palette.bg_2);
         }
 
+        // `padding: 3px 10px 3px 20px`.
         var x = rect.x + 20;
         if (dirty.contains(note.id)) {
-            p.fill(.{ .x = x, .y = y + @divTrunc(rect.h, 2) - 2, .w = 4, .h = 4 }, palette.dirty);
-            x += 8;
+            const dot = Rect{ .x = x, .y = y + @divTrunc(rect.h - 5, 2), .w = 5, .h = 5 };
+            p.fillRound(dot, 2.5, palette.dirty);
+            x += 5 + 6; // the dot, then `gap: 6px`
         }
 
         p.drawEllipsized(
-            .{ .x = x, .y = rect.y, .w = rect.right() - x - 8, .h = rect.h },
+            .{ .x = x, .y = rect.y, .w = rect.right() - x - 10, .h = rect.h },
             if (note.title.len > 0) note.title else "Untitled",
-            if (is_active) palette.fg_0 else palette.fg_0,
-            .{},
+            if (is_active) palette.white else palette.fg_0,
+            .{ .family = .{ .px = theme.sidebar_entry_font_px } },
         );
     }
 
@@ -464,22 +498,42 @@ pub const StatusBar = struct {
     pub const Item = struct {
         id: Button,
         label: []const u8,
+        /// The outline drawn to the left of the label. The original set one on
+        /// every button except the conflict badge, which led with a warning
+        /// sign instead.
+        icon: ?[]const gfx.Segment = null,
         /// Amber, for the conflict badge.
         warn: bool = false,
         disabled: bool = false,
     };
 
-    fn buttonRect(self: *const StatusBar, p: *const Painter, items: []const Item, index: usize) Rect {
+    /// `footer { font-size: 11px }`.
+    const label_opts = Painter.RunOptions{ .family = .{ .px = theme.status_font_px } };
+    /// `.bar-btn { padding: 2px 6px; gap: 4px }` around a 12px icon.
+    const btn_pad: i32 = 6;
+    const btn_gap: i32 = 4;
+    const icon_px: i32 = 12;
+
+    fn buttonWidth(p: *Painter, item: Item) i32 {
+        const text: i32 = @intFromFloat(@ceil(p.measureSpan(item.label, label_opts)));
+        const lead: i32 = if (item.icon != null) icon_px + btn_gap else 0;
+        return btn_pad + lead + text + btn_pad;
+    }
+
+    fn buttonRect(self: *const StatusBar, p: *Painter, items: []const Item, index: usize) Rect {
+        // `.left { padding: 0 6px; gap: 2px }`.
         var x = self.rect.x + 6;
+        const h: i32 = @min(self.rect.h - 4, 18);
+        const y = self.rect.y + @divTrunc(self.rect.h - h, 2);
         for (items, 0..) |item, i| {
-            const w: i32 = @intFromFloat(@ceil(p.measureRun(item.label, 4)) + 12);
-            if (i == index) return .{ .x = x, .y = self.rect.y, .w = w, .h = self.rect.h };
-            x += w + 4;
+            const w = buttonWidth(p, item);
+            if (i == index) return .{ .x = x, .y = y, .w = w, .h = h };
+            x += w + 2;
         }
         return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
     }
 
-    pub fn hitTest(self: *const StatusBar, p: *const Painter, items: []const Item, px: i32, py: i32) ?Button {
+    pub fn hitTest(self: *const StatusBar, p: *Painter, items: []const Item, px: i32, py: i32) ?Button {
         if (!self.rect.contains(px, py)) return null;
         for (items, 0..) |item, i| {
             if (item.disabled) continue;
@@ -495,7 +549,9 @@ pub const StatusBar = struct {
         for (items, 0..) |item, i| {
             const r = self.buttonRect(p, items, i);
             const is_hovered = hovered != null and hovered.? == item.id and !item.disabled;
-            if (is_hovered) p.fill(r, palette.bg_2);
+            // `.bar-btn:hover { background: var(--bg-2); border-radius: 3px }`.
+            if (is_hovered) p.fillRound(r, 3, palette.bg_2);
+
             const fg = if (item.warn)
                 palette.dirty
             else if (item.disabled)
@@ -504,7 +560,24 @@ pub const StatusBar = struct {
                 palette.fg_0
             else
                 palette.fg_2;
-            p.drawLabel(r, item.label, fg, .center, .{});
+
+            var x = r.x + btn_pad;
+            if (item.icon) |segments| {
+                p.drawIcon(.{
+                    .x = x,
+                    .y = r.y + @divTrunc(r.h - icon_px, 2),
+                    .w = icon_px,
+                    .h = icon_px,
+                }, segments, fg);
+                x += icon_px + btn_gap;
+            }
+            p.drawLabel(
+                .{ .x = x, .y = r.y, .w = r.right() - btn_pad - x, .h = r.h },
+                item.label,
+                fg,
+                .left,
+                label_opts,
+            );
         }
 
         if (status) |s| {
@@ -516,12 +589,14 @@ pub const StatusBar = struct {
             else
                 std.fmt.bufPrint(&buf, "Ln {d}, Col {d}", .{ s.line + 1, s.col + 1 }) catch return;
 
+            // `.right { font-family: var(--font-mono) }` -- monospace so the
+            // digits stop shifting as the numbers change.
             p.drawLabel(
                 .{ .x = self.rect.x, .y = self.rect.y, .w = self.rect.w - 10, .h = self.rect.h },
                 text,
                 palette.fg_2,
                 .right,
-                .{},
+                .{ .family = .{ .kind = .mono, .px = theme.status_font_px } },
             );
         }
     }

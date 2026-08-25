@@ -6,6 +6,8 @@ const c = @import("c.zig");
 pub const color = @import("color.zig");
 pub const surface = @import("surface.zig");
 pub const font = @import("font.zig");
+const fonts = @import("fonts.zig");
+pub const shapes = @import("shapes.zig");
 pub const painter = @import("painter.zig");
 pub const golden = @import("golden.zig");
 
@@ -14,12 +16,17 @@ pub const Rect = surface.Rect;
 pub const Surface = surface.Surface;
 pub const palette = color.palette;
 pub const Painter = painter.Painter;
+pub const Segment = shapes.Segment;
 pub const FontStack = font.FontStack;
+pub const Fonts = fonts.Fonts;
+pub const Family = fonts.Family;
 
 test {
     _ = color;
     _ = surface;
     _ = font;
+    _ = fonts;
+    _ = shapes;
     _ = painter;
     _ = golden;
     _ = @import("golden_test.zig");

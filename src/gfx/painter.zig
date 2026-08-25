@@ -11,19 +11,32 @@ const core = @import("core");
 const color = @import("color.zig");
 const surface = @import("surface.zig");
 const font = @import("font.zig");
+const shapes = @import("shapes.zig");
+const fonts_mod = @import("fonts.zig");
 
 const Rgba = color.Rgba;
 const Rect = surface.Rect;
 const Surface = surface.Surface;
 const FontStack = font.FontStack;
+const Fonts = fonts_mod.Fonts;
+const Family = fonts_mod.Family;
 
 pub const Painter = struct {
     surf: *Surface,
+    /// The editor's monospace stack. Note text is drawn on its cell grid, so
+    /// everything that reasons in cells reaches for this one directly.
     fonts: *FontStack,
+    /// Every face. Interface text picks one by `RunOptions.family`.
+    faces: *Fonts,
     clip: Rect,
 
-    pub fn init(surf: *Surface, fonts: *FontStack) Painter {
-        return .{ .surf = surf, .fonts = fonts, .clip = surf.bounds() };
+    pub fn init(surf: *Surface, faces: *Fonts) Painter {
+        return .{
+            .surf = surf,
+            .fonts = faces.get(.{ .kind = .mono }),
+            .faces = faces,
+            .clip = surf.bounds(),
+        };
     }
 
     /// Narrow the clip, returning the previous one so the caller can restore it.
@@ -45,6 +58,26 @@ pub const Painter = struct {
         self.surf.strokeRect(rect, self.clip, c);
     }
 
+    /// Fill `rect` with its corners rounded, as `border-radius` did.
+    pub fn fillRound(self: *Painter, rect: Rect, radius: f32, c: Rgba) void {
+        shapes.fillRoundRect(self.surf, self.clip, rect, radius, c);
+    }
+
+    pub fn strokeRound(self: *Painter, rect: Rect, radius: f32, width: f32, c: Rgba) void {
+        shapes.strokeRoundRect(self.surf, self.clip, rect, radius, width, c);
+    }
+
+    /// Draw an icon outline, scaled from its 16x16 design space into `dest`.
+    pub fn drawIcon(
+        self: *Painter,
+        dest: Rect,
+        segments: []const shapes.Segment,
+        c: Rgba,
+    ) void {
+        // The original's icons were all `stroke-width: 1.4` in a 16-unit box.
+        shapes.strokePath(self.surf, self.clip, dest, 16, segments, 1.4, c);
+    }
+
     pub fn clear(self: *Painter, c: Rgba) void {
         self.surf.fillRect(self.surf.bounds(), self.clip, c);
     }
@@ -60,9 +93,16 @@ pub const Painter = struct {
 
     /// Blit one glyph with its top-left at `(pen_x, baseline_y)` adjusted by the
     /// glyph's bearings.
-    fn blitGlyph(self: *Painter, g: font.Glyph, pen_x: f64, baseline_y: f64, c: Rgba) void {
+    fn blitGlyph(
+        self: *Painter,
+        stack: *const FontStack,
+        g: font.Glyph,
+        pen_x: f64,
+        baseline_y: f64,
+        c: Rgba,
+    ) void {
         if (g.isEmpty()) return;
-        const cov = self.fonts.coverageOf(g);
+        const cov = stack.coverageOf(g);
 
         const x0: i32 = @intFromFloat(@round(pen_x)) ;
         const y0: i32 = @intFromFloat(@round(baseline_y));
@@ -94,7 +134,13 @@ pub const Painter = struct {
     }
 
     pub const RunOptions = struct {
+        /// Which face to draw in. Ignored by `drawRun`, which is the editor's
+        /// cell-grid path and is always monospace.
+        family: Family = .{},
         weight: font.Weight = .regular,
+        /// Extra pixels between clusters, as CSS `letter-spacing`. Only the
+        /// proportional path honours it; the editor's grid has no room for it.
+        tracking: f64 = 0,
         underline: bool = false,
         strike: bool = false,
         /// Tab stop in narrow cells. Tabs advance to the next stop measured
@@ -126,7 +172,7 @@ pub const Painter = struct {
             const advance = self.cellWidth(g.text);
             if (self.fonts.resolveCluster(g.text)) |resolved| {
                 if (self.fonts.glyph(resolved, opts.weight)) |glyph| {
-                    self.blitGlyph(glyph, pen, baseline_y, c);
+                    self.blitGlyph(self.fonts, glyph, pen, baseline_y, c);
                 }
             }
             pen += advance;
@@ -163,6 +209,101 @@ pub const Painter = struct {
         });
     }
 
+    /// Vertical room for one line of text inside `rect`.
+    ///
+    /// A label is centered on its rect, so a rect shorter than the line box
+    /// would clip the ascenders and descenders off every glyph rather than the
+    /// horizontal overflow the caller meant to bound. Callers inset rects on
+    /// all four sides routinely, which makes a too-short rect the common case:
+    /// a 20px bar inset by 6 leaves 8px for a 19px line.
+    fn lineClip(self: *Painter, rect: Rect, family: Family) Rect {
+        const rh = self.faces.get(family).metrics.row_height;
+        const top = @as(f64, @floatFromInt(rect.y)) +
+            (@as(f64, @floatFromInt(rect.h)) - rh) / 2;
+        const y = @min(rect.y, @as(i32, @intFromFloat(@floor(top))));
+        const bottom = @max(rect.bottom(), @as(i32, @intFromFloat(@ceil(top + rh))));
+        return .{ .x = rect.x, .y = y, .w = rect.w, .h = bottom - y };
+    }
+
+    /// Baseline for a single line centered in `rect`.
+    fn baselineIn(self: *Painter, rect: Rect, family: Family) f64 {
+        const m = self.faces.get(family).metrics;
+        return @as(f64, @floatFromInt(rect.y)) +
+            (@as(f64, @floatFromInt(rect.h)) - m.row_height) / 2 + m.ascent;
+    }
+
+    /// Width of one grapheme cluster in `family`.
+    pub fn spanWidth(self: *Painter, cluster: []const u8, family: Family) f64 {
+        return self.faces.get(family).clusterAdvance(cluster);
+    }
+
+    /// Width `drawSpan` would occupy, without drawing.
+    pub fn measureSpan(self: *Painter, text: []const u8, opts: RunOptions) f64 {
+        const stack = self.faces.get(opts.family);
+        const tab_px = @as(f64, @floatFromInt(opts.tab_size)) * stack.metrics.ch_width;
+        var w: f64 = 0;
+        var it = core.grapheme.iterate(text);
+        while (it.nextCluster()) |g| {
+            if (g.text.len == 1 and g.text[0] == '\t') {
+                w = (@floor(w / tab_px) + 1) * tab_px;
+                continue;
+            }
+            w += stack.clusterAdvance(g.text) + opts.tracking;
+        }
+        return w;
+    }
+
+    /// Draw interface text, spaced by each glyph's own advance.
+    ///
+    /// Note text goes through `drawRun` instead, which snaps to the cell grid
+    /// so the caret and the glyphs cannot disagree. The chrome has no caret to
+    /// keep in step, and the original let the browser space `-apple-system`
+    /// proportionally -- forcing it onto a grid shows up as wrong tracking in
+    /// every label.
+    pub fn drawSpan(
+        self: *Painter,
+        x: f64,
+        baseline_y: f64,
+        text: []const u8,
+        c: Rgba,
+        opts: RunOptions,
+    ) f64 {
+        const stack = self.faces.get(opts.family);
+        const tab_px = @as(f64, @floatFromInt(opts.tab_size)) * stack.metrics.ch_width;
+
+        var pen = x;
+        var it = core.grapheme.iterate(text);
+        while (it.nextCluster()) |g| {
+            if (g.text.len == 1 and g.text[0] == '\t') {
+                pen = x + (@floor((pen - x) / tab_px) + 1) * tab_px;
+                continue;
+            }
+            if (stack.resolveCluster(g.text)) |resolved| {
+                if (stack.glyph(resolved, opts.weight)) |glyph| {
+                    self.blitGlyph(stack, glyph, pen, baseline_y, c);
+                }
+            }
+            pen += stack.clusterAdvance(g.text) + opts.tracking;
+        }
+
+        const width = pen - x;
+        if (width > 0) {
+            if (opts.underline) self.fill(.{
+                .x = @intFromFloat(@round(x)),
+                .y = @intFromFloat(@round(baseline_y + 2)),
+                .w = @intFromFloat(@round(width)),
+                .h = 1,
+            }, c);
+            if (opts.strike) self.fill(.{
+                .x = @intFromFloat(@round(x)),
+                .y = @intFromFloat(@round(baseline_y - stack.metrics.ascent * 0.3)),
+                .w = @intFromFloat(@round(width)),
+                .h = 1,
+            }, c);
+        }
+        return pen;
+    }
+
     pub const Align = enum { left, center, right };
 
     /// Draw a single-line label inside `rect`, vertically centered.
@@ -174,19 +315,17 @@ pub const Painter = struct {
         how: Align,
         opts: RunOptions,
     ) void {
-        const m = self.fonts.metrics;
-        const width = self.measureRun(text, opts.tab_size);
+        const width = self.measureSpan(text, opts);
         const x: f64 = switch (how) {
             .left => @floatFromInt(rect.x),
             .center => @as(f64, @floatFromInt(rect.x)) + (@as(f64, @floatFromInt(rect.w)) - width) / 2,
             .right => @as(f64, @floatFromInt(rect.x + rect.w)) - width,
         };
-        const baseline = @as(f64, @floatFromInt(rect.y)) +
-            (@as(f64, @floatFromInt(rect.h)) - m.row_height) / 2 + m.ascent;
+        const baseline = self.baselineIn(rect, opts.family);
 
-        const saved = self.pushClip(rect);
+        const saved = self.pushClip(self.lineClip(rect, opts.family));
         defer self.popClip(saved);
-        _ = self.drawRun(x, baseline, text, c, opts);
+        _ = self.drawSpan(x, baseline, text, c, opts);
     }
 
     /// Draw `text` clipped to `rect`, appending an ellipsis when it does not
@@ -198,33 +337,30 @@ pub const Painter = struct {
         c: Rgba,
         opts: RunOptions,
     ) void {
-        const m = self.fonts.metrics;
         const available: f64 = @floatFromInt(rect.w);
-        if (self.measureRun(text, opts.tab_size) <= available) {
+        if (self.measureSpan(text, opts) <= available) {
             self.drawLabel(rect, text, c, .left, opts);
             return;
         }
 
         // Trim clusters until the text plus an ellipsis fits.
         const ellipsis = "…";
-        const ellipsis_w = self.cellWidth(ellipsis);
+        const ellipsis_w = self.spanWidth(ellipsis, opts.family);
         var end: usize = 0;
         var used: f64 = 0;
         var it = core.grapheme.iterate(text);
         while (it.nextCluster()) |g| {
-            const w = self.cellWidth(g.text);
+            const w = self.spanWidth(g.text, opts.family);
             if (used + w + ellipsis_w > available) break;
             used += w;
             end = g.offset + g.text.len;
         }
 
-        const saved = self.pushClip(rect);
+        const saved = self.pushClip(self.lineClip(rect, opts.family));
         defer self.popClip(saved);
-        const baseline = @as(f64, @floatFromInt(rect.y)) +
-            (@as(f64, @floatFromInt(rect.h)) - m.row_height) / 2 + m.ascent;
-        var pen = self.drawRun(@floatFromInt(rect.x), baseline, text[0..end], c, opts);
-        _ = self.drawRun(pen, baseline, ellipsis, c, opts);
-        pen = 0;
+        const baseline = self.baselineIn(rect, opts.family);
+        const pen = self.drawSpan(@floatFromInt(rect.x), baseline, text[0..end], c, opts);
+        _ = self.drawSpan(pen, baseline, ellipsis, c, opts);
     }
 };
 
@@ -245,12 +381,15 @@ fn inkCount(s: *const Surface, bg: Rgba) usize {
 
 const Fixture = struct {
     surf: Surface,
-    fonts: FontStack,
+    fonts: Fonts,
 
     fn init(w: u32, h: u32, px: u32) !Fixture {
         return .{
             .surf = try Surface.init(testing.allocator, w, h),
-            .fonts = try FontStack.init(testing.allocator, px),
+            .fonts = try Fonts.initBundled(testing.allocator, .{
+                .ui_px = px,
+                .editor_px = px,
+            }),
         };
     }
     fn deinit(self: *Fixture) void {
@@ -280,7 +419,7 @@ test "Korean text draws and advances two cells per syllable" {
     p.clear(palette.bg_0);
 
     const end = p.drawRun(0, 24, "안녕", palette.fg_0, .{});
-    try testing.expectApproxEqAbs(f.fonts.metrics.cjk_width * 2, end, 0.01);
+    try testing.expectApproxEqAbs(f.fonts.mono_default.metrics.cjk_width * 2, end, 0.01);
     try testing.expect(inkCount(&f.surf, palette.bg_0) > 20);
 }
 
@@ -290,7 +429,7 @@ test "a run of mixed scripts stays on the cell grid" {
     var p = f.painter();
     p.clear(palette.bg_0);
 
-    const m = f.fonts.metrics;
+    const m = f.fonts.mono_default.metrics;
     const end = p.drawRun(0, 24, "ab안c", palette.fg_0, .{});
     // 2 narrow + 1 wide + 1 narrow.
     try testing.expectApproxEqAbs(m.ch_width * 3 + m.cjk_width, end, 0.01);
@@ -301,7 +440,7 @@ test "tabs advance to the next stop, measured from the run start" {
     defer f.deinit();
     var p = f.painter();
     p.clear(palette.bg_0);
-    const m = f.fonts.metrics;
+    const m = f.fonts.mono_default.metrics;
 
     // A tab at the very start fills one whole stop.
     try testing.expectApproxEqAbs(

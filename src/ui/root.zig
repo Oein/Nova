@@ -15,6 +15,7 @@ const net = @import("net");
 const ev = @import("event.zig");
 const theme = @import("theme.zig");
 const chrome = @import("chrome.zig");
+const icons = @import("icons.zig");
 const overlays = @import("overlays.zig");
 const editor_view = @import("editor_view.zig");
 const find_mod = @import("find.zig");
@@ -29,7 +30,7 @@ pub const Root = struct {
     io: std.Io,
 
     application: app.state.App,
-    fonts: gfx.FontStack,
+    fonts: gfx.Fonts,
     surface: gfx.Surface,
     outbox: ev.Outbox,
 
@@ -83,7 +84,10 @@ pub const Root = struct {
             .gpa = gpa,
             .io = io,
             .application = app.state.App.init(gpa, io),
-            .fonts = try gfx.FontStack.init(gpa, theme.editor_font_default),
+            .fonts = try gfx.Fonts.init(gpa, io, .{
+                .ui_px = theme.ui_font_px,
+                .editor_px = theme.editor_font_default,
+            }),
             .surface = try gfx.Surface.init(gpa, width, height),
             .outbox = ev.Outbox.init(gpa),
             .sidebar = chrome.Sidebar.init(gpa),
@@ -104,7 +108,7 @@ pub const Root = struct {
 
     /// Finish construction. Must be called once the Root is where it will live.
     pub fn attach(self: *Root) void {
-        self.editor = editor_view.EditorView.init(self.gpa, &self.fonts);
+        self.editor = editor_view.EditorView.init(self.gpa, self.fonts.get(.{ .kind = .mono }));
     }
 
     pub fn deinit(self: *Root) void {
@@ -225,6 +229,13 @@ pub const Root = struct {
                 self.invalidate();
             },
             .ime_preedit => |pre| {
+                // SDL has no separate composition-start event: the first
+                // non-empty preedit *is* the start. Without this the view
+                // never enters composing state, and the preedit is drawn as
+                // ordinary text instead of underlined in the accent color.
+                if (!self.editor.composing) {
+                    if (self.activeTab()) |tab| try self.editor.imeStart(tab, self.now_ms);
+                }
                 try self.editor.imeUpdate(pre.text);
                 self.sendImeArea();
                 self.invalidate();
@@ -445,7 +456,7 @@ pub const Root = struct {
         const clamped = theme.clampEditorFont(px);
         if (clamped == self.editor_font_px) return;
         self.editor_font_px = clamped;
-        try self.fonts.setPixelSize(clamped);
+        try self.fonts.setEditorSize(clamped);
         if (self.activeTab()) |tab| {
             self.editor.content_width = 0; // force a re-wrap
             _ = try self.editor.setViewport(tab, self.editorRect());
@@ -787,9 +798,9 @@ pub const Root = struct {
     /// The status-bar entries for this frame.
     fn statusItems(self: *Root, buf: *[4]chrome.StatusBar.Item) []const chrome.StatusBar.Item {
         var n: usize = 0;
-        buf[n] = .{ .id = .trash, .label = "Trash" };
+        buf[n] = .{ .id = .trash, .label = "Trash", .icon = icons.trash };
         n += 1;
-        buf[n] = .{ .id = .settings, .label = "Settings" };
+        buf[n] = .{ .id = .settings, .label = "Settings", .icon = icons.settings };
         n += 1;
 
         const cfg = self.notion_cfg orelse return buf[0..n];
@@ -797,6 +808,7 @@ pub const Root = struct {
             buf[n] = .{
                 .id = .notion_sync,
                 .label = if (self.notion.isRunning()) "Syncing..." else "Notion",
+                .icon = icons.sync,
             };
             n += 1;
         }
@@ -1096,6 +1108,20 @@ pub const Root = struct {
                 .head = self.editor.hitTest(tab, x, y),
             };
             self.invalidate();
+        }
+
+        // The sidebar resolves its own hover during paint, from the rectangles
+        // it draws, so it only needs to be told where the pointer is.
+        {
+            const inside = self.sidebar.rect.contains(x, y);
+            const next: @TypeOf(self.sidebar.hover) = if (inside) .{ .x = x, .y = y } else null;
+            const changed = (next == null) != (self.sidebar.hover == null) or
+                (next != null and self.sidebar.hover != null and
+                    (next.?.x != self.sidebar.hover.?.x or next.?.y != self.sidebar.hover.?.y));
+            if (changed) {
+                self.sidebar.hover = next;
+                self.invalidate();
+            }
         }
 
         {
@@ -1415,13 +1441,13 @@ test "zoom changes the font and re-wraps" {
     try h.key(.{ .character = 'n' }, .{ .meta = true });
     try h.typeText("some text to lay out");
 
-    const before = h.root.fonts.metrics.ch_width;
+    const before = h.root.fonts.mono_default.metrics.ch_width;
     try h.key(.{ .character = '=' }, .{ .meta = true });
     try testing.expectEqual(@as(u32, theme.editor_font_default + 1), h.root.editor_font_px);
     // One step need not change the integer cell width -- a 0.5 em advance can
     // round to the same pixel -- but several steps must.
     for (0..4) |_| try h.key(.{ .character = '=' }, .{ .meta = true });
-    try testing.expect(h.root.fonts.metrics.ch_width > before);
+    try testing.expect(h.root.fonts.mono_default.metrics.ch_width > before);
 
     try h.key(.{ .character = '0' }, .{ .meta = true });
     try testing.expectEqual(@as(u32, theme.editor_font_default), h.root.editor_font_px);
@@ -1562,6 +1588,74 @@ test "a window resize relayouts everything" {
     try testing.expectEqual(@as(u32, 640), h.root.surface.width);
     try testing.expectEqual(@as(i32, 640), h.root.statusRect().w);
     try h.root.paint();
+}
+
+/// Two notes, the second dirty and unsaved -- the state the window golden and
+/// the two chrome goldens all start from.
+fn goldenScene(h: *Harness) !void {
+    try h.key(.{ .character = 'n' }, .{ .meta = true });
+    try h.typeText("# 프로젝트 노트\n\n첫 번째 노트입니다.");
+    try h.key(.{ .character = 's' }, .{ .meta = true });
+
+    try h.key(.{ .character = 'n' }, .{ .meta = true });
+    try h.typeText("# Weekly sync\n\n안녕하세요 반갑습니다\n\t- indented item\nplain **bold** tail");
+    try h.key(.{ .character = 's' }, .{ .meta = true });
+    try h.typeText("\nunsaved edit");
+
+    h.root.now_ms = 1_724_500_000_000;
+    h.root.editor.caret_phase_ms = 0;
+}
+
+test "golden: the settings panel, rounded as the stylesheet had it" {
+    const h = try Harness.init(testing.allocator, "root-golden-settings");
+    defer h.deinit();
+    try goldenScene(h);
+
+    h.root.settings.open = true;
+    try h.root.paint();
+
+    var tio = try golden.TestIo.init(testing.allocator);
+    defer tio.deinit();
+    try golden.expectMatches(testing.allocator, tio.io, "settings", &h.root.surface);
+}
+
+test "golden: the sidebar and bottom bar under the pointer" {
+    const h = try Harness.init(testing.allocator, "root-golden-hover");
+    defer h.deinit();
+    try goldenScene(h);
+
+    // The second note row: the first is the active one, whose own background
+    // covers hover, so it would show nothing.
+    const row = h.root.sidebar.rect.y + chrome.Sidebar.header_h + 21 +
+        theme.sidebar_group_h + theme.sidebar_row_h + @divTrunc(theme.sidebar_row_h, 2);
+    try h.send(.{ .mouse_move = .{ .x = h.root.sidebar.rect.x + 60, .y = row } });
+    try h.root.paint();
+    try testing.expect(h.root.sidebar.hover != null);
+    // `.entry:hover { background: var(--bg-2) }`. The two greys are seven
+    // values apart, so this is checked by number rather than by eye.
+    try testing.expect(h.root.surface.at(h.root.sidebar.rect.x + 60, row).eql(theme.palette.bg_2));
+
+    var tio = try golden.TestIo.init(testing.allocator);
+    defer tio.deinit();
+    try golden.expectMatches(testing.allocator, tio.io, "sidebar-hover", &h.root.surface);
+}
+
+test "golden: a hovered bottom-bar button" {
+    const h = try Harness.init(testing.allocator, "root-golden-btn");
+    defer h.deinit();
+    try goldenScene(h);
+
+    const bar = h.root.statusRect();
+    try h.send(.{ .mouse_move = .{ .x = bar.x + 20, .y = bar.y + @divTrunc(bar.h, 2) } });
+    try h.root.paint();
+    try testing.expectEqual(chrome.StatusBar.Button.trash, h.root.status_hover.?);
+    // In the 4px gap between the icon and the label, so the probe lands on
+    // the button's own background rather than on ink.
+    try testing.expect(h.root.surface.at(bar.x + 26, bar.y + @divTrunc(bar.h, 2)).eql(theme.palette.bg_2));
+
+    var tio = try golden.TestIo.init(testing.allocator);
+    defer tio.deinit();
+    try golden.expectMatches(testing.allocator, tio.io, "bottom-bar-hover", &h.root.surface);
 }
 
 test "golden: the whole window" {

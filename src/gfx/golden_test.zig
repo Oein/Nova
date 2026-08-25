@@ -15,13 +15,13 @@ const Rect = gfx.Rect;
 
 const Scene = struct {
     surf: gfx.Surface,
-    fonts: gfx.FontStack,
+    fonts: gfx.Fonts,
     tio: golden.TestIo,
 
     fn init(w: u32, h: u32, px: u32) !Scene {
         return .{
             .surf = try gfx.Surface.init(testing.allocator, w, h),
-            .fonts = try gfx.FontStack.init(testing.allocator, px),
+            .fonts = try gfx.Fonts.initBundled(testing.allocator, .{ .editor_px = px }),
             .tio = try golden.TestIo.init(testing.allocator),
         };
     }
