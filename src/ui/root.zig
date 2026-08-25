@@ -79,7 +79,14 @@ pub const Root = struct {
     groups: std.ArrayList(app.datefmt.Group) = .empty,
     visible_ids: std.ArrayList([]const u8) = .empty,
 
-    pub fn init(gpa: Allocator, io: std.Io, width: u32, height: u32) !Root {
+    pub const Options = struct {
+        /// Draw with the platform's own faces. Tests turn this off: a golden
+        /// image compared byte for byte must not depend on which fonts the
+        /// machine running it happens to have installed.
+        system_fonts: bool = true,
+    };
+
+    pub fn init(gpa: Allocator, io: std.Io, width: u32, height: u32, opts: Options) !Root {
         const self = Root{
             .gpa = gpa,
             .io = io,
@@ -87,6 +94,7 @@ pub const Root = struct {
             .fonts = try gfx.Fonts.init(gpa, io, .{
                 .ui_px = theme.ui_font_px,
                 .editor_px = theme.editor_font_default,
+                .system = opts.system_fonts,
             }),
             .surface = try gfx.Surface.init(gpa, width, height),
             .outbox = ev.Outbox.init(gpa),
@@ -1313,7 +1321,7 @@ const Harness = struct {
         errdefer gpa.destroy(self);
 
         const r = try gpa.create(Root);
-        r.* = try Root.init(gpa, env.io, 900, 560);
+        r.* = try Root.init(gpa, env.io, 900, 560, .{ .system_fonts = false });
         r.attach();
         try r.application.openWorkspace(ws_path);
         try r.applyLayout();
@@ -1633,7 +1641,9 @@ test "golden: the sidebar and bottom bar under the pointer" {
     try testing.expect(h.root.sidebar.hover != null);
     // `.entry:hover { background: var(--bg-2) }`. The two greys are seven
     // values apart, so this is checked by number rather than by eye.
-    try testing.expect(h.root.surface.at(h.root.sidebar.rect.x + 60, row).eql(theme.palette.bg_2));
+    // Inside the row's 20px left padding, so the probe cannot land on a glyph
+    // whose width depends on the face in use.
+    try testing.expect(h.root.surface.at(h.root.sidebar.rect.x + 5, row).eql(theme.palette.bg_2));
 
     var tio = try golden.TestIo.init(testing.allocator);
     defer tio.deinit();

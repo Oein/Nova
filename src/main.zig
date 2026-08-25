@@ -53,7 +53,7 @@ pub fn main() !void {
     // Root must already be at its final address.
     const root = try gpa.create(ui.Root);
     defer gpa.destroy(root);
-    root.* = try ui.Root.init(gpa, io, size.w, size.h);
+    root.* = try ui.Root.init(gpa, io, size.w, size.h, .{});
     root.attach();
     defer root.deinit();
 
