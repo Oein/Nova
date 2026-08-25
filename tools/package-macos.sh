@@ -32,8 +32,19 @@ OUT="dist"
 DMG="$OUT/Nova-$VERSION-$ARCH.dmg"
 STAGE="$OUT/stage"
 
+# SDL treats any explicitly named target as a cross build, even one that
+# matches the host, and refuses to configure without somewhere to find Apple's
+# frameworks. Xcode is right here, so point it at the installed SDK; that also
+# makes building the other architecture work from either kind of Mac.
+SDK="$(xcrun --show-sdk-path)"
+
 echo "==> Building Nova $VERSION for $ARCH"
-zig build bundle -Doptimize=ReleaseFast -Dtarget="$ARCH-macos"
+zig build bundle \
+  -Doptimize=ReleaseFast \
+  -Dtarget="$ARCH-macos" \
+  -Dmacos-sdk-include="$SDK/usr/include" \
+  -Dmacos-sdk-frameworks="$SDK/System/Library/Frameworks" \
+  -Dmacos-sdk-libs="$SDK/usr/lib"
 
 echo "==> Staging"
 rm -rf "$STAGE" "$DMG"

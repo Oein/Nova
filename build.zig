@@ -91,6 +91,20 @@ fn linkTextStack(b: *std.Build, mod: *std.Build.Module) void {
     mod.link_libcpp = true;
 }
 
+/// Where to find Apple's headers, frameworks and stub libraries, for the case
+/// where Zig cannot work it out itself.
+const MacosSdk = struct {
+    include: []const u8,
+    frameworks: []const u8,
+    libs: []const u8,
+
+    fn applyTo(self: MacosSdk, mod: *std.Build.Module) void {
+        mod.addSystemIncludePath(.{ .cwd_relative = self.include });
+        mod.addSystemFrameworkPath(.{ .cwd_relative = self.frameworks });
+        mod.addLibraryPath(.{ .cwd_relative = self.libs });
+    }
+};
+
 /// Turn off mingw's fortified string wrappers.
 ///
 /// `_mingw.h` only defines them when the compiler reports optimization, so they
@@ -297,6 +311,15 @@ pub fn build(b: *std.Build) void {
         })
     else
         b.dependency("sdl", .{ .target = target, .optimize = optimize });
+    // When the SDK is named explicitly, use it for our own link too, not just
+    // SDL's: naming a target turns off Zig's own SDK discovery, and the menu
+    // bar needs AppKit.
+    const sdk: ?MacosSdk = if (sdk_include != null and sdk_frameworks != null and sdk_libs != null)
+        .{ .include = sdk_include.?, .frameworks = sdk_frameworks.?, .libs = sdk_libs.? }
+    else
+        null;
+    if (sdk) |s| s.applyTo(platform);
+
     const exe = b.addExecutable(.{
         .name = "Nova",
         .root_module = b.createModule(.{
@@ -315,6 +338,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("platform", platform);
     exe.root_module.addImport("net", net);
     exe.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
+    if (sdk) |s| s.applyTo(exe.root_module);
     linkMacosMenu(exe.root_module, target);
     b.installArtifact(exe);
 
