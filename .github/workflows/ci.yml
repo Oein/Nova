@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is in the matrix because it is the only place the SDL link and
+        # the native menu bar are exercised; cross-compiling to macOS needs the
+        # SDK, which is not available on the Linux runner.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+
+      - name: Test
+        run: zig build test --summary all
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Upload the golden-image diffs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-diffs-${{ matrix.os }}
+          path: src/gfx/testdata/golden/*.actual.png
+          if-no-files-found: ignore
+
+  cross:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+      - name: Linux and Windows
+        run: |
+          zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe
+          zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSafe

@@ -1,142 +1,89 @@
-name: release
+name: Release
 
-# Nova 데스크톱 앱 빌드 + 릴리즈.
-# macOS → .dmg (arm64), Windows → .exe (x64) 빌드 후 Releaser에 업로드.
-# - Actions 탭에서 "Run workflow" (workflow_dispatch)
-# - 또는 v* 태그 push 시 자동 실행 (예: git tag v0.1.0 && git push origin v0.1.0)
+# Builds Nova and attaches the installers to a release.
+#
+# macOS is built on a macOS runner, not cross-compiled: linking SDL needs
+# Apple's frameworks, which ship with Xcode and are not redistributable, and
+# `hdiutil` (which writes the .dmg) is macOS-only.
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
-        description: '버전 (예: v1.0.0)'
+        description: 'Version (e.g. v1.0.0)'
         required: true
         type: string
-      type:
-        description: '릴리즈 타입'
-        required: true
-        type: choice
-        default: release
-        options:
-          - release
-          - beta
-          - dev
-      description:
-        description: '릴리즈 노트'
-        required: false
-        type: string
-  push:
-    tags:
-      - 'v*'
 
 jobs:
-  build:
+  macos:
+    name: macOS (.dmg)
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-latest
-            bundles: dmg
-            bundle-dir: dmg
-            ext: dmg
-            artifact: Nova-macos-arm64.dmg
-          - os: windows-latest
-            bundles: nsis
-            bundle-dir: nsis
-            ext: exe
-            artifact: Nova-windows-x64.exe
-    runs-on: ${{ matrix.os }}
+        arch: [aarch64, x86_64]
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: mlugg/setup-zig@v1
         with:
-          node-version: 20
-          cache: npm
+          version: 0.16.0
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: zig build test --summary all
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      - name: Resolve version
-        id: ver
-        shell: bash
-        run: |
-          VERSION="${{ inputs.version }}"
-          if [ -z "$VERSION" ]; then
-            VERSION="${{ github.ref_name }}"
-          fi
-          # tauri.conf.json / Cargo 는 'v' 없는 semver 를 요구
-          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "semver=${VERSION#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Set app version
-        shell: bash
-        run: |
-          SEMVER="${{ steps.ver.outputs.semver }}"
-          if [[ "$SEMVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            tmp=$(mktemp)
-            jq --arg v "$SEMVER" '.version = $v' src-tauri/tauri.conf.json > "$tmp"
-            mv "$tmp" src-tauri/tauri.conf.json
-            echo "tauri.conf.json version -> $SEMVER"
-          else
-            echo "::warning::'$SEMVER' is not a valid semver, keeping tauri.conf.json version"
-          fi
-
-      - name: Install Node dependencies
-        run: npm ci
-
-      - name: Build Tauri app
-        run: npx tauri build --bundles ${{ matrix.bundles }}
+      - name: Package
         env:
-          # 코드 서명 비활성화 (서명 인증서 미설정)
-          TAURI_SIGNING_PRIVATE_KEY: ""
-          CSC_IDENTITY_AUTO_DISCOVERY: false
+          ARCH: ${{ matrix.arch }}
+        run: ./tools/package-macos.sh
 
-      - name: Rename artifact
-        shell: bash
+      - name: Verify the image mounts
         run: |
-          src=$(ls src-tauri/target/release/bundle/${{ matrix.bundle-dir }}/*.${{ matrix.ext }} | head -n 1)
-          mv "$src" "src-tauri/target/release/bundle/${{ matrix.bundle-dir }}/${{ matrix.artifact }}"
+          hdiutil attach dist/*.dmg -mountpoint /Volumes/NovaCheck -nobrowse
+          test -x "/Volumes/NovaCheck/Nova.app/Contents/MacOS/Nova"
+          test -f "/Volumes/NovaCheck/Nova.app/Contents/Info.plist"
+          hdiutil detach /Volumes/NovaCheck
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: nova-${{ matrix.os }}
-          path: src-tauri/target/release/bundle/${{ matrix.bundle-dir }}/${{ matrix.artifact }}
+          name: Nova-macos-${{ matrix.arch }}-dmg
+          path: dist/*.dmg
           if-no-files-found: error
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
+  windows:
+    name: Windows (.exe)
+    runs-on: windows-latest
     steps:
-      - name: Resolve version
-        id: ver
-        run: |
-          VERSION="${{ inputs.version }}"
-          if [ -z "$VERSION" ]; then
-            VERSION="${{ github.ref_name }}"
-          fi
-          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: mlugg/setup-zig@v1
         with:
-          path: dist
-          merge-multiple: true
+          version: 0.16.0
 
-      - uses: Oein/releaser@main
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast
+
+      - uses: actions/upload-artifact@v4
         with:
-          url: https://oein.fyi
-          api-key: ${{ secrets.RELEASER_API_KEY }}
-          project: ${{ secrets.RELEASER_PROJECT }}
-          version: ${{ steps.ver.outputs.value }}
-          type: ${{ inputs.type || 'release' }}
-          description: ${{ inputs.description }}
-          files: |
-            dist/*.exe
-            dist/*.dmg
+          name: Nova-windows-x64
+          path: zig-out/bin/
+          if-no-files-found: error
+
+  publish:
+    name: Attach to the release
+    needs: [macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          fail_on_unmatched_files: true
