@@ -42,6 +42,10 @@ pub const Options = struct {
     ui_px: u32 = 13,
     /// The editor, and the only size the user can change.
     editor_px: u32 = 13,
+    /// Device pixels per logical unit -- two on a Retina display. Glyphs are
+    /// rasterized at this multiple and every metric is reported back in
+    /// logical units, so nothing above the painter has to know.
+    scale: f32 = 1,
     /// Read the platform's faces. Off in tests: a golden image must not depend
     /// on which fonts the machine running it happens to have installed.
     system: bool = true,
@@ -51,6 +55,10 @@ pub const Options = struct {
 const Source = struct {
     data: []u8,
     index: u32,
+    /// Where it was read from. A literal out of `fontpath`, so it needs no
+    /// lifetime handling -- it is shown in the settings panel, which is the
+    /// only way to tell from inside the app which face actually won.
+    path: []const u8,
 };
 
 const Key = struct { kind: Kind, px: u32 };
@@ -59,6 +67,7 @@ pub const Fonts = struct {
     gpa: Allocator,
     ui_px: u32,
     editor_px: u32,
+    scale: f32,
 
     ui_default: FontStack,
     mono_default: FontStack,
@@ -74,8 +83,9 @@ pub const Fonts = struct {
             .gpa = gpa,
             .ui_px = opts.ui_px,
             .editor_px = opts.editor_px,
-            .ui_default = try FontStack.init(gpa, opts.ui_px),
-            .mono_default = try FontStack.init(gpa, opts.editor_px),
+            .scale = opts.scale,
+            .ui_default = try FontStack.initScaled(gpa, opts.ui_px, opts.scale),
+            .mono_default = try FontStack.initScaled(gpa, opts.editor_px, opts.scale),
         };
         errdefer self.deinit();
         self.ui_default.grid = false;
@@ -118,7 +128,7 @@ pub const Fonts = struct {
     fn readFirst(gpa: Allocator, io: std.Io, candidates: []const fontpath.Face) ?Source {
         for (candidates) |c| {
             const data = std.Io.Dir.cwd().readFileAlloc(io, c.path, gpa, .limited(64 << 20)) catch continue;
-            return .{ .data = data, .index = c.index };
+            return .{ .data = data, .index = c.index, .path = c.path };
         }
         return null;
     }
@@ -160,7 +170,7 @@ pub const Fonts = struct {
         // A size we have not drawn at yet. Anything that goes wrong here is
         // cosmetic -- the default size draws instead -- so none of it is fatal.
         const stack = self.gpa.create(FontStack) catch return fallback;
-        stack.* = FontStack.init(self.gpa, px) catch {
+        stack.* = FontStack.initScaled(self.gpa, px, self.scale) catch {
             self.gpa.destroy(stack);
             return fallback;
         };
@@ -172,6 +182,39 @@ pub const Fonts = struct {
             return fallback;
         };
         return stack;
+    }
+
+    /// The file the interface face came from, or null when the bundled face is
+    /// doing the job.
+    pub fn uiPath(self: *const Fonts) ?[]const u8 {
+        return if (self.ui_src) |src| src.path else null;
+    }
+
+    /// The file note text is set in.
+    pub fn monoPath(self: *const Fonts) ?[]const u8 {
+        return if (self.mono_src) |src| src.path else null;
+    }
+
+    /// Rebuild every face for a new device scale, as when the window moves to
+    /// a display with a different pixel density.
+    pub fn setScale(self: *Fonts, scale: f32) font.Error!void {
+        if (scale == self.scale) return;
+        self.scale = scale;
+
+        // The per-size stacks are rebuilt lazily; dropping them is enough.
+        var it = self.extra.valueIterator();
+        while (it.next()) |st| {
+            st.*.deinit();
+            self.gpa.destroy(st.*);
+        }
+        self.extra.clearRetainingCapacity();
+
+        for ([_]*FontStack{ &self.ui_default, &self.mono_default }) |st| {
+            const px = st.px_size;
+            st.scale = scale;
+            st.px_size = 0; // force `setPixelSize` past its early return
+            try st.setPixelSize(px);
+        }
     }
 
     /// Apply a zoom step. Only note text moves.

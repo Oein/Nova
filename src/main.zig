@@ -47,13 +47,16 @@ pub fn main() !void {
     var shell = try sdl.Shell.init(gpa, io, "Nova", 1200, 800);
     defer shell.deinit();
 
-    const size = shell.drawableSize();
+    // Logical units everywhere above the painter: the same ones SDL reports
+    // mouse positions in. The painter multiplies by the density.
+    const size = shell.windowSize();
+    const scale = shell.pixelDensity();
 
     // Heap-allocated: `Root.attach` points its editor at `Root.fonts`, so the
     // Root must already be at its final address.
     const root = try gpa.create(ui.Root);
     defer gpa.destroy(root);
-    root.* = try ui.Root.init(gpa, io, size.w, size.h, .{});
+    root.* = try ui.Root.init(gpa, io, size.w, size.h, .{ .scale = scale });
     root.attach();
     defer root.deinit();
 
@@ -70,7 +73,7 @@ pub fn main() !void {
     }
 
     try shell.apply(&.{.start_text_input});
-    try root.handle(.{ .resize = .{ .width = size.w, .height = size.h } });
+    try root.handle(.{ .resize = .{ .width = size.w, .height = size.h, .scale = scale } });
 
     while (shell.running) {
         try shell.pump(root, idle_frame_ms);

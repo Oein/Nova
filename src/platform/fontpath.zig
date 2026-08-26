@@ -43,11 +43,19 @@ pub const ui: []const Face = switch (builtin.os.tag) {
 /// The monospace face for note text: `ui-monospace, SFMono-Regular, ...`.
 pub const mono: []const Face = switch (builtin.os.tag) {
     .macos => &.{
+        // `ui-monospace` resolves to SF Mono. Which of these holds it depends
+        // on the macOS version and on whether the user installed Apple's SF
+        // Mono download, so all the places it is known to live are tried.
         .{ .path = "/System/Library/Fonts/SFNSMono.ttf" },
-        // Where SF Mono lived before it was a system font: inside Terminal.
+        .{ .path = "/System/Library/Fonts/SFMono-Regular.otf" },
+        .{ .path = "/Library/Fonts/SF-Mono-Regular.otf" },
+        .{ .path = "/Library/Fonts/SFMono-Regular.otf" },
+        // Where it lived before it was a system font: inside Terminal.
         .{ .path = "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/SFMono-Regular.otf" },
         .{ .path = "/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/SFMono-Regular.otf" },
+        // The stylesheet's next stop after the SF Mono names.
         .{ .path = "/System/Library/Fonts/Menlo.ttc" },
+        .{ .path = "/System/Library/Fonts/Monaco.ttf" },
     },
     .windows => &.{
         .{ .path = "C:\\Windows\\Fonts\\consola.ttf" },

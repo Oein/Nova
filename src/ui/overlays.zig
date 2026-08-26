@@ -530,6 +530,17 @@ pub const TrashPanel = struct {
 pub const Settings = struct {
     open: bool = false,
 
+    /// Which font files the program ended up drawing with.
+    ///
+    /// The stylesheet named families and let the OS choose; a native build has
+    /// to guess at paths, and whether a guess landed is invisible from the
+    /// outside -- Menlo standing in for SF Mono looks like a bug in the
+    /// renderer rather than a font that was not found. So it is shown.
+    pub const Faces = struct {
+        ui: ?[]const u8,
+        mono: ?[]const u8,
+    };
+
     /// The interactive rows, in paint order.
     pub const Row = enum { autosave_enabled, autosave_interval, font_size };
 
@@ -574,6 +585,7 @@ pub const Settings = struct {
         autosave_enabled: bool,
         autosave_sec: u32,
         font_px: u32,
+        faces: Faces,
     ) void {
         if (!self.open) return;
         const rect = panelRect(within);
@@ -619,6 +631,32 @@ pub const Settings = struct {
             "Font size",
             std.fmt.bufPrint(&fbuf, "{d} px   - / +", .{font_px}) catch "",
         );
+
+        _ = section(p, rect, rect.y + 216, "TYPEFACES");
+        faceLine(p, rect, rect.y + 240, "Interface", faces.ui);
+        faceLine(p, rect, rect.y + 260, "Note text", faces.mono);
+    }
+
+    fn faceLine(p: *Painter, rect: Rect, y: i32, label: []const u8, path: ?[]const u8) void {
+        p.drawLabel(
+            .{ .x = rect.x + 16, .y = y, .w = 120, .h = 18 },
+            label,
+            palette.fg_2,
+            .left,
+            .{ .family = .{ .px = 11 } },
+        );
+        const name = if (path) |path_| basename(path_) else "bundled";
+        p.drawEllipsized(
+            .{ .x = rect.x + 146, .y = y, .w = rect.w - 162, .h = 18 },
+            name,
+            palette.fg_1,
+            .{ .family = .{ .px = 11 } },
+        );
+    }
+
+    fn basename(path: []const u8) []const u8 {
+        const cut = std.mem.lastIndexOfAny(u8, path, "/\\") orelse return path;
+        return path[cut + 1 ..];
     }
 
     fn section(p: *Painter, rect: Rect, y: i32, label: []const u8) i32 {

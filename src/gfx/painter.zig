@@ -28,6 +28,13 @@ pub const Painter = struct {
     fonts: *FontStack,
     /// Every face. Interface text picks one by `RunOptions.family`.
     faces: *Fonts,
+    /// Device pixels per logical unit. Every coordinate that arrives here is
+    /// logical and every coordinate that leaves for the surface is multiplied
+    /// by this, which is the whole of the program's high-density support:
+    /// layout, hit testing and the event coordinates SDL reports all stay in
+    /// logical units, and only this last step knows the display is denser.
+    scale: f64,
+    /// In device pixels, like the surface it bounds.
     clip: Rect,
 
     pub fn init(surf: *Surface, faces: *Fonts) Painter {
@@ -35,14 +42,39 @@ pub const Painter = struct {
             .surf = surf,
             .fonts = faces.get(.{ .kind = .mono }),
             .faces = faces,
+            .scale = @floatCast(faces.scale),
             .clip = surf.bounds(),
+        };
+    }
+
+    /// Logical rectangle to device pixels.
+    ///
+    /// Both edges are rounded rather than the origin and the size, so
+    /// rectangles that abut in logical space still abut in device space and no
+    /// seam opens between them.
+    fn dev(self: *const Painter, r: Rect) Rect {
+        const x0: i32 = @intFromFloat(@round(@as(f64, @floatFromInt(r.x)) * self.scale));
+        const y0: i32 = @intFromFloat(@round(@as(f64, @floatFromInt(r.y)) * self.scale));
+        const x1: i32 = @intFromFloat(@round(@as(f64, @floatFromInt(r.x + r.w)) * self.scale));
+        const y1: i32 = @intFromFloat(@round(@as(f64, @floatFromInt(r.y + r.h)) * self.scale));
+        return .{ .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
+    }
+
+    /// The drawing area, in logical units.
+    pub fn bounds(self: *const Painter) Rect {
+        const b = self.surf.bounds();
+        return .{
+            .x = 0,
+            .y = 0,
+            .w = @intFromFloat(@round(@as(f64, @floatFromInt(b.w)) / self.scale)),
+            .h = @intFromFloat(@round(@as(f64, @floatFromInt(b.h)) / self.scale)),
         };
     }
 
     /// Narrow the clip, returning the previous one so the caller can restore it.
     pub fn pushClip(self: *Painter, rect: Rect) Rect {
         const previous = self.clip;
-        self.clip = self.clip.intersect(rect);
+        self.clip = self.clip.intersect(self.dev(rect));
         return previous;
     }
 
@@ -51,20 +83,22 @@ pub const Painter = struct {
     }
 
     pub fn fill(self: *Painter, rect: Rect, c: Rgba) void {
-        self.surf.fillRect(rect, self.clip, c);
+        self.surf.fillRect(self.dev(rect), self.clip, c);
     }
 
     pub fn stroke(self: *Painter, rect: Rect, c: Rgba) void {
-        self.surf.strokeRect(rect, self.clip, c);
+        self.surf.strokeRect(self.dev(rect), self.clip, c);
     }
 
     /// Fill `rect` with its corners rounded, as `border-radius` did.
     pub fn fillRound(self: *Painter, rect: Rect, radius: f32, c: Rgba) void {
-        shapes.fillRoundRect(self.surf, self.clip, rect, radius, c);
+        const s: f32 = @floatCast(self.scale);
+        shapes.fillRoundRect(self.surf, self.clip, self.dev(rect), radius * s, c);
     }
 
     pub fn strokeRound(self: *Painter, rect: Rect, radius: f32, width: f32, c: Rgba) void {
-        shapes.strokeRoundRect(self.surf, self.clip, rect, radius, width, c);
+        const s: f32 = @floatCast(self.scale);
+        shapes.strokeRoundRect(self.surf, self.clip, self.dev(rect), radius * s, width * s, c);
     }
 
     /// Draw an icon outline, scaled from its 16x16 design space into `dest`.
@@ -75,7 +109,9 @@ pub const Painter = struct {
         c: Rgba,
     ) void {
         // The original's icons were all `stroke-width: 1.4` in a 16-unit box.
-        shapes.strokePath(self.surf, self.clip, dest, 16, segments, 1.4, c);
+        // The stroke width is in the icon's own units, so scaling `dest` is
+        // all it takes for the outline to thicken with the display.
+        shapes.strokePath(self.surf, self.clip, self.dev(dest), 16, segments, 1.4, c);
     }
 
     pub fn clear(self: *Painter, c: Rgba) void {
@@ -104,8 +140,10 @@ pub const Painter = struct {
         if (g.isEmpty()) return;
         const cov = stack.coverageOf(g);
 
-        const x0: i32 = @intFromFloat(@round(pen_x)) ;
-        const y0: i32 = @intFromFloat(@round(baseline_y));
+        // The pen arrives in logical units; the bearings are already device
+        // pixels, because the glyph was rasterized there.
+        const x0: i32 = @intFromFloat(@round(pen_x * self.scale));
+        const y0: i32 = @intFromFloat(@round(baseline_y * self.scale));
         const left = x0 + g.left;
         const top = y0 - g.top;
 

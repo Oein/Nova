@@ -80,11 +80,19 @@ pub const Root = struct {
     visible_ids: std.ArrayList([]const u8) = .empty,
 
     pub const Options = struct {
+        /// Device pixels per logical unit; see `gfx.Painter.scale`.
+        scale: f32 = 1,
         /// Draw with the platform's own faces. Tests turn this off: a golden
         /// image compared byte for byte must not depend on which fonts the
         /// machine running it happens to have installed.
         system_fonts: bool = true,
     };
+
+    /// A logical extent in device pixels.
+    fn devicePx(v: u32, scale: f32) u32 {
+        const px = @round(@as(f32, @floatFromInt(v)) * scale);
+        return @intFromFloat(@max(px, 1));
+    }
 
     pub fn init(gpa: Allocator, io: std.Io, width: u32, height: u32, opts: Options) !Root {
         const self = Root{
@@ -95,8 +103,9 @@ pub const Root = struct {
                 .ui_px = theme.ui_font_px,
                 .editor_px = theme.editor_font_default,
                 .system = opts.system_fonts,
+                .scale = opts.scale,
             }),
-            .surface = try gfx.Surface.init(gpa, width, height),
+            .surface = try gfx.Surface.init(gpa, devicePx(width, opts.scale), devicePx(height, opts.scale)),
             .outbox = ev.Outbox.init(gpa),
             .sidebar = chrome.Sidebar.init(gpa),
             .find = find_mod.Find.init(gpa),
@@ -223,9 +232,13 @@ pub const Root = struct {
                 if (self.activeTab() != null) self.invalidate();
             },
             .resize => |r| {
+                if (r.scale != self.fonts.scale) try self.fonts.setScale(r.scale);
                 self.width = r.width;
                 self.height = r.height;
-                try self.surface.resize(r.width, r.height);
+                try self.surface.resize(
+                    devicePx(r.width, r.scale),
+                    devicePx(r.height, r.scale),
+                );
                 try self.applyLayout();
                 self.invalidate();
             },
@@ -1287,6 +1300,7 @@ pub const Root = struct {
             self.application.autosave_enabled,
             self.application.autosave_interval_sec,
             self.editor_font_px,
+            .{ .ui = self.fonts.uiPath(), .mono = self.fonts.monoPath() },
         );
         self.spotlight.paint(&p, self.bounds());
         self.conflicts.paint(&p, self.bounds());
@@ -1312,6 +1326,10 @@ const Harness = struct {
     /// Heap-allocated: `Root.attach` points the editor at `Root.fonts`, so the
     /// Root has to be at its final address before anything runs.
     fn init(gpa: Allocator, name: []const u8) !*Harness {
+        return initScaled(gpa, name, 1);
+    }
+
+    fn initScaled(gpa: Allocator, name: []const u8, scale: f32) !*Harness {
         var env = try db.fsx.TestEnv.init(gpa, name);
         errdefer env.deinit();
         const ws_path = try std.fmt.allocPrint(gpa, "{s}/ws", .{env.path});
@@ -1321,7 +1339,10 @@ const Harness = struct {
         errdefer gpa.destroy(self);
 
         const r = try gpa.create(Root);
-        r.* = try Root.init(gpa, env.io, 900, 560, .{ .system_fonts = false });
+        r.* = try Root.init(gpa, env.io, 900, 560, .{
+            .system_fonts = false,
+            .scale = scale,
+        });
         r.attach();
         try r.application.openWorkspace(ws_path);
         try r.applyLayout();
@@ -1666,6 +1687,52 @@ test "golden: a hovered bottom-bar button" {
     var tio = try golden.TestIo.init(testing.allocator);
     defer tio.deinit();
     try golden.expectMatches(testing.allocator, tio.io, "bottom-bar-hover", &h.root.surface);
+}
+
+test "a denser display draws the same layout into a bigger surface" {
+    const one = try Harness.init(testing.allocator, "root-scale-1");
+    defer one.deinit();
+    const two = try Harness.initScaled(testing.allocator, "root-scale-2", 2);
+    defer two.deinit();
+
+    // Logical geometry is identical...
+    try testing.expectEqual(one.root.bounds(), two.root.bounds());
+    try testing.expectEqual(one.root.sidebar.rect, two.root.sidebar.rect);
+    try testing.expectEqual(one.root.editorRect(), two.root.editorRect());
+    try testing.expectApproxEqAbs(
+        one.root.fonts.mono_default.metrics.ch_width,
+        two.root.fonts.mono_default.metrics.ch_width,
+        0.01,
+    );
+
+    // ...and only the surface behind it is denser.
+    try testing.expectEqual(one.root.surface.width * 2, two.root.surface.width);
+    try testing.expectEqual(one.root.surface.height * 2, two.root.surface.height);
+}
+
+test "a resize onto a denser display rebuilds the faces" {
+    const h = try Harness.init(testing.allocator, "root-rescale");
+    defer h.deinit();
+
+    const before = h.root.fonts.mono_default.metrics.ch_width;
+    try h.send(.{ .resize = .{ .width = 900, .height = 560, .scale = 2 } });
+
+    try testing.expectEqual(@as(u32, 1800), h.root.surface.width);
+    try testing.expectEqual(@as(i32, 900), h.root.bounds().w);
+    // The logical cell is unchanged; the glyphs behind it are twice the size.
+    try testing.expectApproxEqAbs(before, h.root.fonts.mono_default.metrics.ch_width, 0.01);
+}
+
+test "golden: the whole window on a Retina display" {
+    const h = try Harness.initScaled(testing.allocator, "root-golden-2x", 2);
+    defer h.deinit();
+    try goldenScene(h);
+    h.root.toast.show("Saved", h.root.now_ms);
+    try h.root.paint();
+
+    var tio = try golden.TestIo.init(testing.allocator);
+    defer tio.deinit();
+    try golden.expectMatches(testing.allocator, tio.io, "window-2x", &h.root.surface);
 }
 
 test "golden: the whole window" {

@@ -106,7 +106,13 @@ pub const FontStack = struct {
     /// face is emboldened instead.
     bold_faces: std.ArrayList(?Face) = .empty,
 
+    /// Logical size, in the same units the layout reasons in.
     px_size: u32,
+    /// Device pixels per logical unit. Two on a Retina display: glyphs are
+    /// rasterized at twice the size and every metric reported here is divided
+    /// back down, so layout stays in logical units and only the painter knows
+    /// about the difference.
+    scale: f32 = 1,
     metrics: Metrics,
     /// Whether the faces are laid out on a fixed cell grid.
     ///
@@ -126,6 +132,10 @@ pub const FontStack = struct {
     cluster_cache: std.StringHashMapUnmanaged(Resolved) = .empty,
 
     pub fn init(gpa: Allocator, px_size: u32) Error!FontStack {
+        return initScaled(gpa, px_size, 1);
+    }
+
+    pub fn initScaled(gpa: Allocator, px_size: u32, scale: f32) Error!FontStack {
         var lib: ft.FT_Library = null;
         if (ft.FT_Init_FreeType(&lib) != 0) return error.FreeTypeInit;
         errdefer _ = ft.FT_Done_FreeType(lib);
@@ -134,6 +144,7 @@ pub const FontStack = struct {
             .gpa = gpa,
             .lib = lib,
             .px_size = px_size,
+            .scale = scale,
             .metrics = .{ .ch_width = 0, .cjk_width = 0, .row_height = 0, .ascent = 0 },
         };
         errdefer self.deinit();
@@ -165,6 +176,12 @@ pub const FontStack = struct {
         _ = ft.FT_Done_FreeType(self.lib);
     }
 
+    /// The size FreeType is actually asked for.
+    fn devicePx(self: *const FontStack) u32 {
+        const v = @round(@as(f32, @floatFromInt(self.px_size)) * self.scale);
+        return @intFromFloat(@max(v, 1));
+    }
+
     fn openFace(self: *FontStack, data: []const u8, index: u32) Error!Face {
         var face: ft.FT_Face = null;
         const rc = ft.FT_New_Memory_Face(
@@ -177,7 +194,7 @@ pub const FontStack = struct {
         if (rc != 0) return error.FontLoad;
         errdefer _ = ft.FT_Done_Face(face);
 
-        if (ft.FT_Set_Pixel_Sizes(face, 0, self.px_size) != 0) return error.FontLoad;
+        if (ft.FT_Set_Pixel_Sizes(face, 0, self.devicePx()) != 0) return error.FontLoad;
 
         // HarfBuzz shares the FT_Face, so the size set above applies to shaping
         // as well.
@@ -186,7 +203,7 @@ pub const FontStack = struct {
             .ft_face = face,
             .hb_font = hb_font,
             .embolden_for_bold = false,
-            .px_size = self.px_size,
+            .px_size = self.devicePx(),
         };
     }
 
@@ -249,13 +266,14 @@ pub const FontStack = struct {
     pub fn setPixelSize(self: *FontStack, px_size: u32) Error!void {
         if (px_size == self.px_size) return;
         self.px_size = px_size;
+        const device = self.devicePx();
         for (self.faces.items) |*f| {
-            if (ft.FT_Set_Pixel_Sizes(f.ft_face, 0, px_size) != 0) return error.FontLoad;
-            f.px_size = px_size;
+            if (ft.FT_Set_Pixel_Sizes(f.ft_face, 0, device) != 0) return error.FontLoad;
+            f.px_size = device;
         }
         for (self.bold_faces.items) |*maybe| {
             if (maybe.*) |*f| {
-                if (ft.FT_Set_Pixel_Sizes(f.ft_face, 0, px_size) != 0) return error.FontLoad;
+                if (ft.FT_Set_Pixel_Sizes(f.ft_face, 0, device) != 0) return error.FontLoad;
             }
         }
         self.invalidateCaches();
@@ -276,92 +294,58 @@ pub const FontStack = struct {
         return self.advanceInFace(r.face, r.index);
     }
 
+    /// Advance in logical units.
+    ///
+    /// Loaded unhinted on purpose. Hinting rounds the advance to a whole
+    /// device pixel, and the original -- which measured text in the browser --
+    /// never saw a rounded one: SF Mono's `M` is 7.8 px at 13, not 8. Rounding
+    /// it puts every column slightly wrong and compounds across a line.
     fn advanceInFace(self: *FontStack, face_index: u8, glyph_index: u32) f64 {
         const face = self.faces.items[face_index].ft_face;
-        if (ft.FT_Load_Glyph(face, glyph_index, ft.FT_LOAD_DEFAULT) != 0) return 0;
-        // 26.6 fixed point.
+        if (ft.FT_Load_Glyph(face, glyph_index, ft.FT_LOAD_NO_HINTING) != 0) return 0;
+        // 26.6 fixed point, in device pixels.
         const adv: f64 = @floatFromInt(face.*.glyph.*.advance.x);
-        return adv / 64.0;
-    }
-
-    /// Rescale every fallback face so its cells match the primary face's grid.
-    ///
-    /// Without this, a fallback drawn at the same pixel size lands on a
-    /// different advance -- the caret would sit right for Latin and drift for
-    /// Korean on the same line. Matching sizes costs a slightly different
-    /// visual weight between scripts, which is the correct trade: a grid that
-    /// holds beats glyphs that are nominally the same point size.
-    fn matchFallbackSizes(self: *FontStack) void {
-        if (!self.grid) return;
-        if (self.faces.items.len < 2) return;
-        const base: f64 = @floatFromInt(self.px_size);
-
-        for (self.faces.items[1..], 1..) |*face, i| {
-            _ = i;
-            // Measure this face on its own terms: prefer a narrow reference
-            // glyph, fall back to a wide one.
-            const narrow = ft.FT_Get_Char_Index(face.ft_face, 'M');
-            const wide = ft.FT_Get_Char_Index(face.ft_face, '가');
-
-            var target: f64 = 0;
-            var measured: f64 = 0;
-            if (narrow != 0) {
-                target = self.metrics.ch_width;
-                measured = rawAdvance(face.ft_face, narrow);
-            } else if (wide != 0) {
-                target = self.metrics.cjk_width;
-                measured = rawAdvance(face.ft_face, wide);
-            }
-            if (measured <= 0 or target <= 0) continue;
-
-            const scaled = @round(base * target / measured);
-            const px: u32 = @intFromFloat(std.math.clamp(scaled, 4, 400));
-            if (px != face.px_size) {
-                if (ft.FT_Set_Pixel_Sizes(face.ft_face, 0, px) == 0) face.px_size = px;
-            }
-        }
-    }
-
-    fn rawAdvance(face: ft.FT_Face, glyph_index: u32) f64 {
-        if (ft.FT_Load_Glyph(face, glyph_index, ft.FT_LOAD_DEFAULT) != 0) return 0;
-        const adv: f64 = @floatFromInt(face.*.glyph.*.advance.x);
-        return adv / 64.0;
+        return adv / 64.0 / self.scale;
     }
 
     fn recomputeMetrics(self: *FontStack) void {
         const size: f64 = @floatFromInt(self.px_size);
 
-        const ch = self.advanceOf('M');
-        const ch_width = if (ch > 0) ch else @round(size * 0.5);
-
-        // The wide cell is *defined* as two narrow cells rather than measured.
+        // Both cells are measured, and neither is derived from the other.
         //
-        // Measuring looks more honest but is not: FreeType rounds advances to
-        // whole pixels, so at an odd size a 0.5 em Latin glyph rounds to 7 px
-        // while the 1.0 em Hangul glyph is 13 px -- and 2 x 7 != 13. The grid
-        // would drift by a pixel per wide character, which is exactly the
-        // caret-versus-glyph disagreement this rewrite set out to remove. The
-        // default editor size is 13 px, so this is the common case, not an edge
-        // one. A wide glyph is drawn with up to a pixel of slack inside its
-        // cell, which is invisible; a caret in the wrong place is not.
-        const cjk = ch_width * 2;
+        // The original measured them separately in the browser and got widths
+        // that are not in a 1:2 ratio: with `ui-monospace` resolving to SF
+        // Mono, `M` advances 0.6 em (7.8 px at 13) while the Hangul that Apple
+        // SD Gothic Neo supplies advances a full em (13 px). Defining the wide
+        // cell as two narrow ones instead makes every Korean line about a
+        // quarter too wide, which is what a reader sees first.
+        //
+        // Deriving it was defensible while the renderer rounded advances to
+        // whole pixels -- 2 x 7 != 13 put the caret in the wrong place. That
+        // reason is gone now that advances are read unhinted and fractional:
+        // wrapping and drawing both work from these same numbers, so they
+        // cannot disagree whatever the ratio turns out to be.
+        const ch = self.advanceOf('M');
+        const ch_width = if (ch > 0) ch else size * 0.6;
+        const wide = self.advanceOf('한');
+        const cjk = if (wide > 0) wide else ch_width * 2;
 
         const primary = self.faces.items[0].ft_face;
-        const scaled_ascent: f64 = @floatFromInt(primary.*.size.*.metrics.ascender);
-        const scaled_height: f64 = @floatFromInt(primary.*.size.*.metrics.height);
+        const scale: f64 = @floatCast(self.scale);
+        const face_ascent: f64 = @as(f64, @floatFromInt(primary.*.size.*.metrics.ascender)) / 64.0 / scale;
+        const face_height: f64 = @as(f64, @floatFromInt(primary.*.size.*.metrics.height)) / 64.0 / scale;
 
-        // The original floored the line box at `ceil(fontSize * 1.4)`; keeping
-        // that keeps line spacing familiar across a font change.
+        // `Math.max(measured line box, ceil(fontSize * 1.4))`, as measure.ts
+        // had it.
         const min_height = @ceil(size * 1.4);
-        const row_height = @max(scaled_height / 64.0, min_height);
+        const row_height = @max(face_height, min_height);
 
         self.metrics = .{
             .ch_width = ch_width,
             .cjk_width = cjk,
             .row_height = row_height,
-            .ascent = scaled_ascent / 64.0 + (row_height - scaled_height / 64.0) / 2.0,
+            .ascent = face_ascent + (row_height - face_height) / 2.0,
         };
-        self.matchFallbackSizes();
     }
 
     /// Advance of one grapheme cluster as its own face measures it.
@@ -493,17 +477,48 @@ test "the bundled fonts load and produce sane metrics" {
     try testing.expect(fs.metrics.ascent < fs.metrics.row_height);
 }
 
-test "a CJK cell is exactly two Latin cells, at every size" {
-    // The assumption the whole wrap and caret model rests on. It has to hold at
-    // odd sizes too -- 13 px is the default.
+test "both cells are measured, not derived from each other" {
+    // D2Coding happens to be 0.5 em Latin and 1.0 em Hangul, so the bundled
+    // face does land on 1:2 -- but because that is what it measures, not
+    // because anything here doubles the narrow cell. A face where the two are
+    // not in that ratio, which is what `ui-monospace` resolves to on macOS,
+    // has to come out with its own numbers.
     for ([_]u32{ 8, 9, 11, 12, 13, 14, 16, 17, 24, 31, 48 }) |px| {
         var fs = try FontStack.init(testing.allocator, px);
         defer fs.deinit();
-        testing.expectEqual(fs.metrics.ch_width * 2, fs.metrics.cjk_width) catch |err| {
-            std.debug.print("size {d}: ch={d} cjk={d}\n", .{ px, fs.metrics.ch_width, fs.metrics.cjk_width });
-            return err;
-        };
+
+        const ch = fs.advanceOf('M');
+        const wide = fs.advanceOf('한');
+        try testing.expectEqual(ch, fs.metrics.ch_width);
+        try testing.expectEqual(wide, fs.metrics.cjk_width);
     }
+}
+
+test "advances are fractional, as the browser measured them" {
+    // 13 px of a 0.5 em face is 6.5, and the old hinted path rounded that to 7
+    // -- half a pixel of drift per character, and a whole one every other.
+    var fs = try FontStack.init(testing.allocator, 13);
+    defer fs.deinit();
+    try testing.expectApproxEqAbs(@as(f64, 6.5), fs.metrics.ch_width, 0.05);
+    try testing.expectApproxEqAbs(@as(f64, 13.0), fs.metrics.cjk_width, 0.05);
+}
+
+test "a scaled stack rasterizes large and reports small" {
+    var one = try FontStack.init(testing.allocator, 13);
+    defer one.deinit();
+    var two = try FontStack.initScaled(testing.allocator, 13, 2);
+    defer two.deinit();
+
+    // Logical metrics match whatever the device scale is...
+    try testing.expectApproxEqAbs(one.metrics.ch_width, two.metrics.ch_width, 0.01);
+    try testing.expectApproxEqAbs(one.metrics.row_height, two.metrics.row_height, 0.01);
+
+    // ...while the glyphs behind them are twice the size.
+    const r = two.resolveCodepoint('M').?;
+    const big = two.glyph(r, .regular).?;
+    const small = one.glyph(one.resolveCodepoint('M').?, .regular).?;
+    try testing.expect(big.width > small.width);
+    try testing.expect(big.height > small.height);
 }
 
 test "the bundled face supplies both Latin and Hangul" {

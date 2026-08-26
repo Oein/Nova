@@ -68,7 +68,10 @@ pub const Event = union(enum) {
     mouse_move: struct { x: i32, y: i32 },
     wheel: struct { x: i32, y: i32, dx: f32, dy: f32 },
 
-    resize: struct { width: u32, height: u32 },
+    /// New window size in logical units, with the display's device-pixel
+    /// ratio. Both arrive together because dragging a window between displays
+    /// can change either one.
+    resize: struct { width: u32, height: u32, scale: f32 = 1 },
     focus_lost,
     menu: MenuAction,
     /// Clipboard content, in reply to a `read_clipboard` request.

@@ -77,13 +77,19 @@ pub const Shell = struct {
         if (self.picked_folder) |p| self.gpa.free(p);
     }
 
-    /// Pixel size of the drawable, which is not the window size on a HiDPI
-    /// display.
-    pub fn drawableSize(self: *Shell) struct { w: u32, h: u32 } {
+    /// Logical size of the window, in the units SDL reports mouse positions
+    /// in. On a Retina display this is half the drawable size.
+    pub fn windowSize(self: *Shell) struct { w: u32, h: u32 } {
         var w: c_int = 0;
         var h: c_int = 0;
-        _ = c.SDL_GetRenderOutputSize(self.renderer, &w, &h);
+        _ = c.SDL_GetWindowSize(self.window, &w, &h);
         return .{ .w = @intCast(@max(1, w)), .h = @intCast(@max(1, h)) };
+    }
+
+    /// Device pixels per logical unit for the display the window is on.
+    pub fn pixelDensity(self: *Shell) f32 {
+        const d = c.SDL_GetWindowPixelDensity(self.window);
+        return if (d > 0) d else 1;
     }
 
     /// Upload a rendered surface and present it.
@@ -176,9 +182,18 @@ pub const Shell = struct {
                 self.running = false;
                 break :blk null;
             },
-            c.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED, c.SDL_EVENT_WINDOW_RESIZED => blk: {
-                const size = self.drawableSize();
-                break :blk .{ .resize = .{ .width = size.w, .height = size.h } };
+            c.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
+            c.SDL_EVENT_WINDOW_RESIZED,
+            c.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
+            => blk: {
+                // Logical, not the drawable: everything above the painter
+                // works in the same units SDL reports mouse positions in.
+                const size = self.windowSize();
+                break :blk .{ .resize = .{
+                    .width = size.w,
+                    .height = size.h,
+                    .scale = self.pixelDensity(),
+                } };
             },
             c.SDL_EVENT_WINDOW_FOCUS_LOST => .focus_lost,
 
