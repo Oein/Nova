@@ -25,6 +25,18 @@ pub const resizer_w: i32 = 4;
 pub const edge_trigger_w: i32 = 6;
 
 pub const statusbar_h: i32 = 22;
+
+/// Rows moved per notch of a stepped mouse wheel, as most desktops scroll.
+pub const wheel_rows_per_notch: f64 = 3;
+/// Logical points per unit of a precise (trackpad) delta.
+///
+/// SDL's Cocoa backend scales `scrollingDeltaY` by a tenth before reporting
+/// it, so ten recovers the distance the fingers actually travelled and the
+/// content follows them one to one.
+pub const wheel_points_per_precise_unit: f64 = 10;
+/// How long a gesture is still assumed to be coming from a trackpad after the
+/// last fractional delta. See `Root.handleWheel`.
+pub const precise_wheel_grace_ms: i64 = 250;
 pub const tabbar_h: i32 = 32;
 pub const tab_max_w: i32 = 200;
 pub const sidebar_row_h: i32 = 22;

@@ -24,6 +24,23 @@ pub const request_timeout_ms: i64 = 30_000;
 pub const max_retries: u32 = 3;
 /// Notion rejects `append_children` payloads longer than this.
 pub const append_chunk: usize = 100;
+
+/// Byte ceiling for one request body.
+///
+/// Notion's limit is 500 KB and it answers an oversized body with 413 rather
+/// than a validation error, so there is nothing useful to retry on. A hundred
+/// blocks is small when the note is a checklist and far over the limit when it
+/// is prose, so the block count alone cannot bound a request; the headroom is
+/// for the JSON envelope around the blocks and for HTTP's own framing.
+pub const max_body_bytes: usize = 400 * 1024;
+
+/// Encoded size of a value, without keeping the bytes.
+pub fn jsonSize(v: Value) usize {
+    var discarding: std.Io.Writer.Discarding = .init(&.{});
+    std.json.Stringify.value(v, .{}, &discarding.writer) catch
+        return std.math.maxInt(usize);
+    return @intCast(discarding.fullCount());
+}
 /// A title is a rich_text run like any other, and capped the same way.
 pub const title_limit: usize = 2000;
 

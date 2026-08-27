@@ -231,6 +231,8 @@ pub const Session = struct {
 // -- workspace ---------------------------------------------------------------
 
 pub const Workspace = struct {
+    /// A fixed clock, for tests. See `nowMs`.
+    clock: ?i64 = null,
     gpa: Allocator,
     io: std.Io,
     fs: fsx.Fs,
@@ -272,8 +274,14 @@ pub const Workspace = struct {
         self.gpa.free(self.root);
     }
 
+    /// Wall clock, or a frozen one.
+    ///
+    /// Tests set `clock` so that note timestamps -- and the date headings the
+    /// sidebar derives from them -- do not change with the day the suite runs
+    /// on. A golden image compared byte for byte is otherwise good only until
+    /// midnight.
     pub fn nowMs(self: *const Workspace) i64 {
-        return fsx.nowMs(self.io);
+        return self.clock orelse fsx.nowMs(self.io);
     }
 
     // -- path resolution -----------------------------------------------------

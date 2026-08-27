@@ -12,6 +12,7 @@ const store = @import("store.zig");
 const engine_mod = @import("engine.zig");
 const fake_mod = @import("fake.zig");
 const sync = @import("sync.zig");
+const model = @import("model.zig");
 
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -901,4 +902,54 @@ test "a resolution cannot bypass the pull-only guard" {
     // Pushing would destroy the synced block, so the resolver refuses.
     try testing.expectError(error.NotResolvable, r.resolve(note_id, .keep_local));
     try testing.expectEqual(@as(i64, 1), try store.countConflicts(&h.tw.ws));
+}
+
+test "a long note is pushed in requests Notion will accept" {
+    const h = try Harness.init(testing.allocator, "notion-large");
+    defer h.deinit();
+
+    // Prose, not a list: a hundred blocks of it is what overruns the body
+    // limit long before it overruns the block count.
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    const para = "가" ** 600 ++ "\n\n";
+    for (0..400) |_| try body.appendSlice(testing.allocator, para);
+
+    const id = try h.addNote(body.items);
+    defer testing.allocator.free(id);
+
+    var report = try h.sync_();
+    defer report.deinit();
+    try testing.expectEqual(@as(usize, 1), report.created_remote);
+    try testing.expectEqual(@as(usize, 0), report.blocked);
+
+    // Every request stayed inside the ceiling...
+    try testing.expect(h.fake.largest_body <= client.max_body_bytes + 4096);
+    // ...and it took more than one, or the note was not big enough to test.
+    var appends: usize = 0;
+    for (h.fake.calls.items) |p| {
+        if (std.mem.endsWith(u8, p, "/children")) appends += 1;
+    }
+    try testing.expect(appends > 1);
+
+    // And the note still round-trips.
+    const back = try h.noteText(id);
+    defer testing.allocator.free(back);
+    try testing.expectEqualStrings(std.mem.trimEnd(u8, body.items, "\n"), std.mem.trimEnd(u8, back, "\n"));
+}
+
+test "a chunk is cut by bytes as well as by block count" {
+    // A hundred blocks fit only when they are small.
+    var small: [client.append_chunk]model.Value = undefined;
+    for (&small) |*v| v.* = .{ .string = "x" };
+    try testing.expectEqual(
+        @as(usize, client.append_chunk),
+        engine_mod.Engine.appendChunkEnd(&small, 0),
+    );
+
+    const big = "y" ** (300 * 1024);
+    var heavy: [4]model.Value = undefined;
+    for (&heavy) |*v| v.* = .{ .string = big };
+    // Two of these are already over the ceiling, so only one goes per request.
+    try testing.expectEqual(@as(usize, 1), engine_mod.Engine.appendChunkEnd(&heavy, 0));
 }

@@ -74,6 +74,8 @@ pub const Root = struct {
     now_ms: i64 = 0,
     mouse_down_in_editor: bool = false,
     status_hover: ?chrome.StatusBar.Button = null,
+    /// When a fractional wheel delta was last seen. See `handleWheel`.
+    precise_wheel_ms: ?i64 = null,
 
     /// Scratch for the grouped note list, rebuilt each paint.
     groups: std.ArrayList(app.datefmt.Group) = .empty,
@@ -1163,8 +1165,33 @@ pub const Root = struct {
             .arrow });
     }
 
+    /// Scroll by one wheel event.
+    ///
+    /// A stepped mouse wheel and a trackpad arrive through the same event and
+    /// want completely different amounts of travel per unit, and nothing in
+    /// the event says which sent it. What does distinguish them is that SDL
+    /// rounds a stepped wheel to whole notches, while a trackpad reports the
+    /// distance the fingers moved, scaled by a tenth -- so a fraction is proof
+    /// of a trackpad. Treating a trackpad as three rows per unit made it six
+    /// times too eager, which reads as a scroll that cannot be aimed.
+    ///
+    /// A fraction is proof, but a whole number is not proof of the opposite: a
+    /// gesture will occasionally land on one. The grace window carries the
+    /// verdict across those events so a single one does not jolt the page
+    /// mid-swipe.
     fn handleWheel(self: *Root, x: i32, y: i32, dy: f32) !void {
-        const step = @as(f64, dy) * self.editor.rowHeight() * 3;
+        const d: f64 = dy;
+        const fractional = d != @round(d);
+        if (fractional) self.precise_wheel_ms = self.now_ms;
+        const precise = fractional or if (self.precise_wheel_ms) |t|
+            self.now_ms - t < theme.precise_wheel_grace_ms
+        else
+            false;
+
+        const step = if (precise)
+            d * theme.wheel_points_per_precise_unit
+        else
+            d * self.editor.rowHeight() * theme.wheel_rows_per_notch;
         if (self.sidebarRect().contains(x, y)) {
             self.sidebar.scroll_top = @max(0, self.sidebar.scroll_top - step);
         } else if (self.editorRect().contains(x, y)) {
@@ -1345,6 +1372,10 @@ const Harness = struct {
         });
         r.attach();
         try r.application.openWorkspace(ws_path);
+        // A fixed clock, so the date headings the sidebar derives from note
+        // timestamps -- and therefore the golden images -- do not change with
+        // the day the suite runs on.
+        if (r.application.ws) |*w| w.clock = 1_724_500_000_000;
         try r.applyLayout();
 
         self.* = .{ .env = env, .root = r, .ws_path = ws_path, .gpa = gpa };
@@ -1733,6 +1764,60 @@ test "golden: the whole window on a Retina display" {
     var tio = try golden.TestIo.init(testing.allocator);
     defer tio.deinit();
     try golden.expectMatches(testing.allocator, tio.io, "window-2x", &h.root.surface);
+}
+
+test "a trackpad scrolls with the fingers, a wheel notch by rows" {
+    const h = try Harness.init(testing.allocator, "root-wheel");
+    defer h.deinit();
+    try h.key(.{ .character = 'n' }, .{ .meta = true });
+    var long: [200][]const u8 = undefined;
+    for (&long) |*l| l.* = "a line of text\n";
+    for (long) |l| try h.typeText(l);
+
+    const e = h.root.editorRect();
+    const px = e.x + @divTrunc(e.w, 2);
+    const py = e.y + @divTrunc(e.h, 2);
+
+    // A fraction can only have come from a trackpad: the content follows the
+    // fingers, ten points per unit.
+    h.root.now_ms = 1_000;
+    h.root.editor.scrollTo(1000);
+    const before = h.root.editor.scroll_top;
+    try h.send(.{ .wheel = .{ .x = px, .y = py, .dx = 0, .dy = -2.5 } });
+    try testing.expectApproxEqAbs(before + 25, h.root.editor.scroll_top, 0.01);
+
+    // A whole number, well after any gesture, is a stepped wheel: three rows.
+    h.root.now_ms = 10_000;
+    h.root.editor.scrollTo(1000);
+    try h.send(.{ .wheel = .{ .x = px, .y = py, .dx = 0, .dy = -1 } });
+    try testing.expectApproxEqAbs(
+        1000 + h.root.editor.rowHeight() * 3,
+        h.root.editor.scroll_top,
+        0.01,
+    );
+}
+
+test "one whole-numbered event mid-gesture does not jolt the page" {
+    const h = try Harness.init(testing.allocator, "root-wheel-grace");
+    defer h.deinit();
+    try h.key(.{ .character = 'n' }, .{ .meta = true });
+    var long: [200][]const u8 = undefined;
+    for (&long) |*l| l.* = "a line of text\n";
+    for (long) |l| try h.typeText(l);
+
+    const e = h.root.editorRect();
+    const px = e.x + @divTrunc(e.w, 2);
+    const py = e.y + @divTrunc(e.h, 2);
+
+    h.root.now_ms = 1_000;
+    h.root.editor.scrollTo(1000);
+    try h.send(.{ .wheel = .{ .x = px, .y = py, .dx = 0, .dy = -0.3 } });
+
+    // Still the same swipe, and this delta happens to be exactly one.
+    h.root.now_ms = 1_050;
+    const before = h.root.editor.scroll_top;
+    try h.send(.{ .wheel = .{ .x = px, .y = py, .dx = 0, .dy = -1 } });
+    try testing.expectApproxEqAbs(before + 10, h.root.editor.scroll_top, 0.01);
 }
 
 test "golden: the whole window" {

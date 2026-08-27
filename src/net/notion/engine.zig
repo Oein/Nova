@@ -665,6 +665,24 @@ pub const Engine = struct {
 
     /// Rewrite a page's body from the note's markdown.
     ///
+    /// How far the next `append_children` request can reach.
+    ///
+    /// Bounded by Notion's block count and by its body size, whichever runs out
+    /// first. One block is always taken even when it is over the ceiling on its
+    /// own: a paragraph can be long enough that nothing else fits beside it,
+    /// and stalling would be worse than letting the API refuse it and say so.
+    pub fn appendChunkEnd(payload: []const Value, offset: usize) usize {
+        const hard = @min(offset + client.append_chunk, payload.len);
+        var size = client.jsonSize(payload[offset]);
+        var end = offset + 1;
+        while (end < hard) : (end += 1) {
+            const next = client.jsonSize(payload[end]);
+            if (size + next > client.max_body_bytes) break;
+            size += next;
+        }
+        return end;
+    }
+
     /// Notion has no block-move API and `append_children` cannot insert at the
     /// front, so writing a body means writing *all* of it and removing all of
     /// the old.
@@ -712,7 +730,7 @@ pub const Engine = struct {
         if (payload.items.len > 0) {
             var offset: usize = 0;
             while (offset < payload.items.len) {
-                const end = @min(offset + client.append_chunk, payload.items.len);
+                const end = appendChunkEnd(payload.items, offset);
                 const res = Endpoints.appendChildren(
                     self.api,
                     self.a(),

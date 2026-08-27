@@ -46,6 +46,10 @@ pub const Fake = struct {
     /// When true, writing to a property the schema lacks fails like the real
     /// API rather than being silently accepted.
     reject_unknown_properties: bool = false,
+    /// The largest request body seen. The real API answers an oversized one
+    /// with 413, which is a limit a test can only check by watching what goes
+    /// out.
+    largest_body: usize = 0,
 
     pages: std.ArrayList(Page) = .empty,
     next_id: usize = 1,
@@ -192,6 +196,7 @@ pub const Fake = struct {
         const self: *Fake = @ptrCast(@alignCast(ptr));
         self.calls.append(self.gpa, self.a().dupe(u8, path) catch return error.OutOfMemory) catch
             return error.OutOfMemory;
+        if (body) |raw| self.largest_body = @max(self.largest_body, raw.len);
 
         // The fake only ever fails on allocation; anything else would be a bug
         // in the fake itself rather than a simulated network fault.
