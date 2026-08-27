@@ -63,7 +63,7 @@ jobs:
           version: 0.16.0
 
       - name: Build
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=ReleaseSafe
 
       - uses: actions/upload-artifact@v4
         with:

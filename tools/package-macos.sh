@@ -38,9 +38,14 @@ STAGE="$OUT/stage"
 # makes building the other architecture work from either kind of Mac.
 SDK="$(xcrun --show-sdk-path)"
 
+# ReleaseSafe, not ReleaseFast. The safety checks cost about two percent of a
+# frame here -- the rasterizer is bound by memory, not by branches -- and they
+# turn a bad index into a message naming the line instead of a segmentation
+# fault in a stripped binary. For an editor holding someone's unsaved work that
+# is not a close call.
 echo "==> Building Nova $VERSION for $ARCH"
 zig build bundle \
-  -Doptimize=ReleaseFast \
+  -Doptimize=ReleaseSafe \
   -Dtarget="$ARCH-macos" \
   -Dmacos-sdk-include="$SDK/usr/include" \
   -Dmacos-sdk-frameworks="$SDK/System/Library/Frameworks" \

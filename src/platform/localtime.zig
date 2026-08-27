@@ -6,6 +6,7 @@
 //! to libc, which has one on every target we build for.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const c = @cImport({
     @cInclude("time.h");
@@ -45,7 +46,17 @@ pub const Date = struct {
 /// thread, and the result is copied out immediately.
 pub fn dateOf(ms: i64) Date {
     const secs: c.time_t = @intCast(@divFloor(ms, std.time.ms_per_s));
-    const tm_ptr = c.localtime(&secs);
+
+    // `localtime` hands back a pointer to one static `struct tm` shared by the
+    // whole process, so two threads asking at once get each other's answer.
+    // The sync worker dates its own records while the sidebar is grouping
+    // notes by day, which is exactly that. Windows keeps the buffer in
+    // thread-local storage and has no `localtime_r`.
+    var storage: c.struct_tm = undefined;
+    const tm_ptr = if (builtin.os.tag == .windows)
+        c.localtime(&secs)
+    else
+        c.localtime_r(&secs, &storage);
     if (tm_ptr == null) return utcDateOf(ms);
     const tm = tm_ptr.*;
     return .{

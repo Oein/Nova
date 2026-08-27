@@ -404,6 +404,14 @@ pub const EditorView = struct {
             @as(f64, @floatFromInt(row)) * self.rowHeight() - self.scroll_top;
     }
 
+    /// The gutter's face: the same monospace as the text, two pixels smaller,
+    /// as `calc(var(--editor-font-size) - 2px)` had it. Deriving it from the
+    /// text face is what makes the line numbers follow the zoom level instead
+    /// of sitting at the interface size.
+    fn gutterFamily(self: *const EditorView) gfx.Family {
+        return .{ .kind = .mono, .px = @max(self.fonts.px_size -| 2, 6) };
+    }
+
     fn paintGutterNumber(
         self: *EditorView,
         p: *Painter,
@@ -419,7 +427,7 @@ pub const EditorView = struct {
             .y = @intFromFloat(y),
             .w = @as(i32, @intFromFloat(gutter_w)) - 10,
             .h = @intFromFloat(row_h),
-        }, text, palette.fg_2, .right, .{});
+        }, text, palette.fg_2, .right, .{ .family = self.gutterFamily() });
     }
 
     /// Paint one visual row's text, with markdown styling and any inline
@@ -932,4 +940,20 @@ test "golden: a full editor pane with gutter, selection and caret" {
     var tio = try golden.TestIo.init(testing.allocator);
     defer tio.deinit();
     try golden.expectMatches(testing.allocator, tio.io, "editor-pane", &f.surf);
+}
+
+test "line numbers follow the zoom level" {
+    const f = try Fixture.init(testing.allocator, "ed-gutter-zoom", "one\ntwo\nthree");
+    defer f.deinit();
+
+    // Two below the text, in the same monospace face -- not the interface one.
+    try testing.expectEqual(gfx.fonts.Kind.mono, f.view.gutterFamily().kind);
+    try testing.expectEqual(f.fonts.mono_default.px_size - 2, f.view.gutterFamily().px);
+
+    try f.fonts.setEditorSize(28);
+    try testing.expectEqual(@as(u32, 26), f.view.gutterFamily().px);
+
+    // And it never falls to nothing at the smallest zoom step.
+    try f.fonts.setEditorSize(theme.editor_font_min);
+    try testing.expect(f.view.gutterFamily().px >= 6);
 }
