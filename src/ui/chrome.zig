@@ -169,6 +169,41 @@ pub const Sidebar = struct {
         return .{ .x = self.rect.right() - 70, .y = self.rect.y + 4, .w = 62, .h = 22 };
     }
 
+    /// Height of the fixed chrome above the scrolling list: the button row,
+    /// then the workspace path and its rule.
+    pub const path_bar_h: i32 = 21;
+
+    /// The scrolling list, below the header and the path bar.
+    pub fn listRect(self: *const Sidebar) Rect {
+        const top = self.rect.y + header_h + path_bar_h;
+        return .{ .x = self.rect.x, .y = top, .w = self.rect.w, .h = @max(0, self.rect.bottom() - top) };
+    }
+
+    /// Total height of the note list, collapsed groups counted as their header
+    /// alone.
+    pub fn contentHeight(self: *const Sidebar, groups: []const app.datefmt.Group) i32 {
+        var h: i32 = 0;
+        for (groups) |*g| {
+            h += theme.sidebar_group_h;
+            if (self.isCollapsed(&g.key)) continue;
+            h += @as(i32, @intCast(g.entries.len)) * theme.sidebar_row_h;
+        }
+        return h;
+    }
+
+    /// How far the list can scroll before it runs out of notes.
+    ///
+    /// Without this the list scrolls away into empty space and keeps going,
+    /// which is what an unbounded `scroll_top` looks like from the outside.
+    pub fn maxScroll(self: *const Sidebar, groups: []const app.datefmt.Group) f64 {
+        const room = self.contentHeight(groups) - self.listRect().h;
+        return if (room > 0) @floatFromInt(room) else 0;
+    }
+
+    pub fn clampScroll(self: *Sidebar, groups: []const app.datefmt.Group) void {
+        self.scroll_top = std.math.clamp(self.scroll_top, 0, self.maxScroll(groups));
+    }
+
     pub const HeaderHit = enum { new_note, open_folder };
 
     pub fn hitTestHeader(self: *const Sidebar, px: i32, py: i32) ?HeaderHit {
@@ -187,26 +222,28 @@ pub const Sidebar = struct {
         workspace_path: ?[]const u8,
         now_ms: i64,
     ) void {
+        // The list can shrink under a scrolled view -- a note is trashed, a
+        // group is collapsed -- so the bound is re-applied here rather than
+        // only where the wheel is handled.
+        self.clampScroll(groups);
+
         const saved = p.pushClip(self.rect);
         defer p.popClip(saved);
 
         p.fill(self.rect, palette.bg_1);
 
-        var y = self.rect.y - @as(i32, @intFromFloat(self.scroll_top));
-
-        // Header: a new-note button and an open-folder button.
+        // Header: a new-note button and an open-folder button. Fixed, like the
+        // path bar under it -- only the note list scrolls.
         const head = self.headerRect();
         p.fill(head, palette.bg_1);
         p.fill(.{ .x = head.x, .y = head.bottom() - 1, .w = head.w, .h = 1 }, palette.bg_3);
         p.drawLabel(self.newNoteRect(), "+", palette.fg_1, .center, .{});
         p.drawLabel(self.openFolderRect(), "Open...", palette.fg_1, .center, .{});
-        y += head.h;
 
         if (workspace_path) |path| {
-            const bar = Rect{ .x = self.rect.x, .y = y, .w = self.rect.w, .h = 20 };
+            const bar = Rect{ .x = self.rect.x, .y = head.bottom(), .w = self.rect.w, .h = 20 };
             p.drawEllipsized(bar.inset(6), path, palette.fg_2, .{});
-            p.fill(.{ .x = self.rect.x, .y = y + 20, .w = self.rect.w, .h = 1 }, palette.bg_2);
-            y += 21;
+            p.fill(.{ .x = bar.x, .y = bar.bottom(), .w = bar.w, .h = 1 }, palette.bg_2);
         } else {
             p.drawLabel(
                 .{ .x = self.rect.x, .y = self.rect.y + 20, .w = self.rect.w, .h = 24 },
@@ -218,22 +255,34 @@ pub const Sidebar = struct {
             return;
         }
 
+        // The list gets its own clip. Rows scrolled past the top would
+        // otherwise keep drawing over the header, which never stops looking
+        // like a bug.
+        const list = self.listRect();
+        const saved_list = p.pushClip(list);
+        defer p.popClip(saved_list);
+
+        var y = list.y - @as(i32, @intFromFloat(self.scroll_top));
         for (groups) |*g| {
             const collapsed = self.isCollapsed(&g.key);
-            self.paintGroupHeader(p, g, y, collapsed, now_ms);
+            if (y + theme.sidebar_group_h > list.y) {
+                self.paintGroupHeader(p, g, y, collapsed, now_ms);
+            }
             y += theme.sidebar_group_h;
             if (collapsed) continue;
 
             for (g.entries) |note| {
-                if (y > self.rect.bottom()) return;
-                self.paintNoteRow(p, note, y, active_id, dirty);
+                if (y > list.bottom()) return;
+                if (y + theme.sidebar_row_h > list.y) {
+                    self.paintNoteRow(p, note, y, active_id, dirty);
+                }
                 y += theme.sidebar_row_h;
             }
         }
 
         if (groups.len == 0) {
             p.drawLabel(
-                .{ .x = self.rect.x, .y = y + 8, .w = self.rect.w, .h = 24 },
+                .{ .x = list.x, .y = y + 8, .w = list.w, .h = 24 },
                 "No notes yet -- press Cmd+N to create one",
                 palette.fg_2,
                 .center,
@@ -337,7 +386,9 @@ pub const Sidebar = struct {
 
     /// Which row a point falls on, walking the same layout `paint` uses.
     pub fn hitTest(self: *const Sidebar, groups: []const app.datefmt.Group, py: i32) ?Row {
-        var y = self.rect.y - @as(i32, @intFromFloat(self.scroll_top)) + header_h + 21;
+        const list = self.listRect();
+        if (py < list.y) return null;
+        var y = list.y - @as(i32, @intFromFloat(self.scroll_top));
         for (groups, 0..) |g, gi| {
             if (py >= y and py < y + theme.sidebar_group_h) {
                 return .{ .group = .{ .key = undefined, .index = gi } };

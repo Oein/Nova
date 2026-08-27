@@ -1193,7 +1193,8 @@ pub const Root = struct {
         else
             d * self.editor.rowHeight() * theme.wheel_rows_per_notch;
         if (self.sidebarRect().contains(x, y)) {
-            self.sidebar.scroll_top = @max(0, self.sidebar.scroll_top - step);
+            self.sidebar.scroll_top -= step;
+            self.sidebar.clampScroll(self.groups.items);
         } else if (self.editorRect().contains(x, y)) {
             self.editor.scrollTo(self.editor.scroll_top - step);
         }
@@ -1818,6 +1819,62 @@ test "one whole-numbered event mid-gesture does not jolt the page" {
     const before = h.root.editor.scroll_top;
     try h.send(.{ .wheel = .{ .x = px, .y = py, .dx = 0, .dy = -1 } });
     try testing.expectApproxEqAbs(before + 10, h.root.editor.scroll_top, 0.01);
+}
+
+test "the sidebar list stops when it runs out of notes" {
+    const h = try Harness.init(testing.allocator, "root-sidebar-scroll");
+    defer h.deinit();
+
+    // Two notes: nothing like enough to fill the list.
+    try h.key(.{ .character = 'n' }, .{ .meta = true });
+    try h.typeText("first");
+    try h.key(.{ .character = 'n' }, .{ .meta = true });
+    try h.typeText("second");
+    try h.root.paint();
+
+    const s = h.root.sidebar;
+    try testing.expectEqual(@as(f64, 0), s.maxScroll(h.root.groups.items));
+
+    // A firm swipe down moves nothing, because there is nothing below.
+    const px = s.rect.x + 40;
+    const py = s.rect.y + s.rect.h - 40;
+    h.root.now_ms = 1_000;
+    for (0..20) |_| try h.send(.{ .wheel = .{ .x = px, .y = py, .dx = 0, .dy = -12.5 } });
+    try testing.expectEqual(@as(f64, 0), h.root.sidebar.scroll_top);
+}
+
+test "a scrolled sidebar list never draws over its header" {
+    const h = try Harness.init(testing.allocator, "root-sidebar-clip");
+    defer h.deinit();
+    for (0..60) |_| {
+        try h.key(.{ .character = 'n' }, .{ .meta = true });
+        try h.typeText("a note");
+    }
+    try h.root.paint();
+
+    const list = h.root.sidebar.listRect();
+    try testing.expect(h.root.sidebar.maxScroll(h.root.groups.items) > 0);
+
+    // Scroll well into the list, so rows would land over the header.
+    h.root.sidebar.scroll_top = 200;
+    try h.root.paint();
+
+    // Nothing above the list may move when the list scrolls. That is a
+    // stronger claim than any single probe, and it does not depend on knowing
+    // which colour a given pixel should have.
+    const above_rows: usize = @intCast(list.y - h.root.sidebar.rect.y);
+    const stride: usize = h.root.surface.width;
+    const px_above = stride * above_rows * @as(usize, @intFromFloat(h.root.fonts.scale));
+
+    const before = try testing.allocator.dupe(gfx.Rgba, h.root.surface.pixels[0..px_above]);
+    defer testing.allocator.free(before);
+
+    h.root.sidebar.scroll_top = 200;
+    h.root.invalidate();
+    try h.root.paint();
+    try testing.expect(h.root.sidebar.scroll_top > 0);
+
+    try testing.expectEqualSlices(gfx.Rgba, before, h.root.surface.pixels[0..px_above]);
 }
 
 test "golden: the whole window" {
